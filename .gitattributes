@@ -1,0 +1,23 @@
+# 换行符约定。
+#
+# 仓库里一律存 LF（历史如此、差分干净），但下面这几类是**给 Windows 双击的**——
+# 检出时必须给回 CRLF：cmd.exe 读 LF 结尾的 .cmd 会在某些分支下出怪问题，
+# 而 .vbs / .hta 由 wscript / mshta 直接按行读，同道理。
+#
+# 为什么现在才加：开发平台一直是 Windows（本地 autocrlf=true，看不出问题）；
+# 要开源了就得把这条写进文件——Linux / macOS 上的协作者 checkout 之后
+# 再提交，才不会把这几个入口文件变成 LF。
+
+* text=auto
+
+*.cmd text eol=crlf
+*.bat text eol=crlf
+*.vbs text eol=crlf
+*.hta text eol=crlf
+*.ps1 text eol=crlf
+
+# 运行期数据与本地素材（.gitignore 也挡着，这里再兜一道：即使被误加也不做 EOL 转换）
+*.db binary
+*.wav binary
+*.safetensors binary
+*.gguf binary

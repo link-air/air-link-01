@@ -1,0 +1,13 @@
+# 零第三方依赖。
+#
+# 这不是疏忽，是实现规格 §1 的技术选型结论：
+#   - 存储用标准库 sqlite3（JSON 全量读写在数据量大时不可接受）
+#   - LLM / embedding 用标准库 urllib（本项目只需要「POST 一个 JSON、拿回一个 JSON」，
+#     引入 openai SDK 会带进 httpx / pydantic 一串依赖）
+#   - 向量全量加载算余弦（几千条 × 1536 维约几十 MB，还不需要 ANN）
+#
+# 唯一可选依赖：embedding 走本地模型时需要 sentence-transformers
+#   （仅当 endpoint 配成 local://<模型名> 时才懒加载，不装不影响远程模式）
+#   安装：pip install sentence-transformers
+#
+# 要求：Python 3.11+（开发环境为 3.14）

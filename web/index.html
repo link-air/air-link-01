@@ -1,0 +1,3866 @@
+<!doctype html>
+<!--
+air-link-01 的仪表盘页面（整个前端就这一个文件）。
+后端是 `core/dashboard.py`：这里的每个 `api(...)` 都对着那边两张路由表
+（见 `do_GET` / `do_POST` 的 docstring）。**改接口时两边一起改。**
+
+分三段：
+  一、样式（<style>）   老纸色：暖、低对比、久看不累，见 `:root`。
+  二、骨架（<body>）    只有对话区的常驻结构，其余视图由脚本填、互相覆盖（不翻页）。
+  三、脚本（<script>）  文案与工具 → 气泡/确认条 → 说话与流式 → 唤醒面板 →
+                        各视图（viewScenes / viewMirror / viewSettings …）→
+                        顶部轮询（refreshHeader / boot）→ 语音播报 → 拖入文件
+
+三条约定：
+  1. 不抄后端的常量——档位名、档案键、输入上限都由接口一起给回来。
+  2. 只读走 GET；会改东西的（改 / 删 / 否决 / 合并）全走 POST。
+  3. 失败要在界面上留一句，不能只 `console.log`——用户看不见控制台。
+-->
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>air-link-01 · 记忆实验台</title>
+<style>
+  /* 旧纸色：暖、低对比、久看不累。
+     为什么不用深色：这是「看自己」的地方，不是终端。
+     参照的是纸和墨的关系——背景像纸，文字像墨，强调用暗红棕（印章色）。*/
+  :root{
+    --bg:#f2ece0;        /* 纸 */
+    --panel:#faf6ec;     /* 亮一点的纸（侧栏 / 卡片） */
+    --panel2:#eae2d1;    /* 压下去的纸（悬停 / 次级块） */
+    --line:#ded4c0;      /* 界线：比纸深一点就够，别用黑 */
+    --fg:#34302a;        /* 墨 */
+    --dim:#8b8271;       /* 淡墨 */
+    --acc:#8a6a3c;       /* 印章色（暖棕） */
+    --ok:#5f7a4a; --warn:#a2741f; --bad:#a8543f; --sen:#7a5a9a;
+    --mono:"Cascadia Mono",Consolas,"SF Mono",Menlo,monospace;
+  }
+  *{box-sizing:border-box}
+  html,body{height:100%;margin:0}
+  body{
+    background:var(--bg); color:var(--fg);
+    font:14.5px/1.65 system-ui,-apple-system,"Microsoft YaHei",sans-serif;
+    display:grid; grid-template-rows:auto 1fr; overflow:hidden;
+  }
+  ::-webkit-scrollbar{width:10px;height:10px}
+  ::-webkit-scrollbar-thumb{background:#d9cfba;border-radius:6px;border:2px solid var(--bg)}
+  ::-webkit-scrollbar-thumb:hover{background:#cbbfa5}
+  ::-webkit-scrollbar-track{background:transparent}
+
+  header{
+    display:flex; align-items:center; gap:12px; padding:10px 16px;
+    border-bottom:1px solid var(--line); background:var(--panel);
+  }
+  header h1{font-size:14.5px;margin:0;font-weight:600;letter-spacing:.3px}
+  header .stat{font-family:var(--mono);font-size:11.5px;color:var(--dim)}
+  header .stat b{color:var(--fg);font-weight:600}
+  header .spacer{flex:1}
+  .pill{font-size:11px;padding:2px 8px;border-radius:10px;border:1px solid var(--line);color:var(--dim)}
+  .pill.on{color:var(--ok);border-color:#c3d3b4}
+  .pill.off{color:var(--warn);border-color:#ddc9a0}
+  /* 服务灯红档（2026-09-25）：最近一次调用失败——"配置在但用不了"要看得出来 */
+  .pill.bad{color:var(--bad);border-color:#ddbdb4}
+  /* 人格选择器（和谁聊）：顶栏里的一小块，样式随 pill */
+  #personaSel{font-size:11.5px;padding:3px 6px;border-radius:10px;border:1px solid var(--line);
+              background:transparent;color:var(--fg);cursor:pointer}
+  #personaSel:focus{outline:none;border-color:#c9b893}
+
+  /* 收起侧栏 = **改成单列**，不是把第一列压成 0。
+     压成 0 会坏：#side 一旦 `display:none` 就不再是 grid item，
+     #stage 会自动补到第一列（宽 0），整个对话区就塌到左边去了（真踩过）。
+     单列时 #stage 是唯一参与布局的项，自然占满。 */
+  main{display:grid;grid-template-columns:190px 1fr;min-height:0}
+  main.nav-hidden{grid-template-columns:1fr}
+  main.nav-hidden #side{display:none}
+
+  /* ---- 左侧导航（原来是底部标签栏，横排挤不下、也抢焦点） ---- */
+  #side{overflow-y:auto;background:var(--panel);border-right:1px solid var(--line);padding:10px 8px}
+  #side .grp{font-size:11px;color:var(--dim);padding:10px 12px 4px;letter-spacing:.5px}
+  #side button{
+    display:block;width:100%;text-align:left;background:transparent;border:0;
+    border-radius:8px;padding:8px 12px;color:var(--dim);font-size:13.5px;margin-bottom:1px;
+  }
+  #side button:hover{background:var(--panel2);color:var(--fg)}
+  #side button.active{background:#e9e0cc;color:var(--fg);font-weight:600}
+
+  #stage{min-height:0;display:grid}
+  #chatView{display:grid;grid-template-rows:1fr auto auto;min-height:0}
+  #chatView, #panelView{grid-area:1/1}
+
+  /* ---- 右侧栏（宽屏右列）：唤醒 + 更早的对话 ----
+     宽屏时对话右侧多一列：顶上住唤醒（这一轮想起了什么），下面住历史回填
+     （已提取原文 / 压缩摘要）——对话主流只留窗口里还热乎的往来。
+     消息列 720 居中、两边本来就有留白，那片空白正好安置这些。
+     开关只有一个：boot 按 1200px 判一次、加在 body.wide 上
+     （内容渲染进哪边是启动时定的——缩窗口不搬家，刷新重判）。
+     窄屏没有这一列，唤醒条与历史回填全部照旧（下面一条规则都不生效）。 */
+  #histAside{display:none}
+  body.wide #chatView{grid-template-columns:minmax(0,1fr) 320px;grid-template-rows:auto 1fr auto}
+  /* 收起右列（顶栏的「收起」钮）：与 ☰ 收左侧同一规矩——**收成单列**，
+     不是把列压成 0（见 `main.nav-hidden` 的注释，那边踩过）。 */
+  body.wide.aside-hidden #chatView{grid-template-columns:1fr}
+  body.wide.aside-hidden #wakeWrap,
+  body.wide.aside-hidden #histAside{display:none}
+  /* 窄屏没有右列，开关不出现（免得点了没反应） */
+  body:not(.wide) #asideBtn{display:none}
+  body.wide #msgs{grid-column:1;grid-row:1/span 2}
+  body.wide #composerWrap{grid-column:1;grid-row:3}
+  body.wide #wakeWrap{
+    grid-column:2;grid-row:1;border-top:0;border-left:1px solid var(--line);
+    border-bottom:1px solid var(--line);
+  }
+  body.wide #wakeBar{max-width:none;margin:0;padding:9px 14px}
+  body.wide #wakeBody{padding:12px 14px 14px}
+  body.wide #wakeBody .box{max-width:none;margin:0 0 10px}
+  body.wide #histAside{
+    display:block;grid-column:2;grid-row:2/span 2;
+    box-sizing:border-box;overflow-y:auto;background:var(--panel);
+    border-left:1px solid var(--line);padding:14px 14px 20px;
+  }
+  body.wide #histAside:empty{display:none}
+  /* as-*：「更早的对话」的小标题/注脚——**不挂容器**（历史遗留：早先收起右列
+     时会把这些节点搬进对话区，故自带 720 中轴；2026-09-21 起收起不再搬家，
+     见 toggleAside——保留 max-width 无害，别删，万一又想搬）。 */
+  .as-head{font-size:12px;font-weight:600;color:var(--dim);letter-spacing:.3px;max-width:720px;margin:0 auto}
+  .as-note{font-size:11px;color:var(--dim);opacity:.8;margin:2px auto 12px;max-width:720px}
+  .as-sec{font-size:11px;color:var(--dim);margin:14px auto 6px;letter-spacing:.3px;max-width:720px}
+  #histAside .m{max-width:none;margin:0 0 10px}
+  #histAside .doc{margin-bottom:6px}
+  /* 备忘录（对话右侧，随手划——2026-09-21 设计稿 D 条 4）：
+     收起只占一行、点开是全列；0 条时整块不显示（见 renderMemoPanel）。
+     常驻右列（#histAside）内部顶部；窄屏没有右列，随它一起不可见。 */
+  #memoSec{border:1px solid var(--line);border-radius:10px;background:var(--bg);
+    margin:0 0 12px;overflow:hidden}
+  #memoSec .mh{display:flex;justify-content:space-between;align-items:center;
+    padding:7px 11px;cursor:pointer;font-size:12px;color:var(--dim)}
+  #memoSec .mh .chev{transition:transform .15s;font-size:10px}
+  #memoSec.open .mh .chev{transform:rotate(180deg)}
+  #memoSec .mb{display:none;border-top:1px solid var(--line);padding:4px 11px 8px}
+  #memoSec.open .mb{display:block}
+  #memoSec .mi{display:flex;gap:8px;align-items:flex-start;font-size:12.5px;
+    padding:6px 0;border-bottom:1px dashed var(--line);line-height:1.5}
+  #memoSec .mi:last-child{border-bottom:0}
+  #memoSec .mi .mx{flex:1;min-width:0;word-break:break-word}
+  #memoSec .mi .mid{font-family:var(--mono);font-size:11px;color:var(--dim);margin-right:5px}
+  #memoSec .mi .due{color:var(--acc)}
+  #memoSec .mi button{flex:0 0 auto;font-size:11px;padding:1px 8px;margin-top:1px}
+  /* 组头与步骤缩进（2026-09-22）：一件事的多步聚在一个组名下（见 memoGroups） */
+  #memoSec .mg{font-size:11.5px;color:var(--dim);margin:8px 0 0;letter-spacing:.3px}
+  #memoSec .mi.sub{padding-left:12px}
+
+  /* ---- 对话：居中一列，两侧留白 ---- */
+  #msgs{overflow-y:auto;padding:24px 4vw 8px}
+  /* 底距从 18 收到 12：下面多了操作条那条占位（约一行高），
+     两个加起来才是"两条消息之间"的实际留白——不然会松一整行。 */
+  .m{margin:0 auto 12px;max-width:720px}
+  .m .who{font-size:11px;color:var(--dim);margin-bottom:4px;font-family:var(--mono);letter-spacing:.3px}
+  .m .bubble{white-space:pre-wrap;word-break:break-word}
+  /* 用户的话像「引用块」，air 的话是正文——参照对话该有的样子：
+     air 说的多、你说的少，不该用同样的分量去压。
+     **用户的话靠右**（参照 DeepSeek Harness 的对话样式）：不读内容也分得清谁在说。
+     气泡上限跟着那边的比例走——它的上限是内容列宽的 0.702，这里的内容列 720px，
+     于是 505px；再留一道 82% 兜住窄窗口。 */
+  .m.user{display:flex;flex-direction:column;align-items:flex-end}
+  .m.user .bubble{background:#e8e0cf;border:1px solid #dbd1bc;border-radius:14px;
+                  padding:10px 14px;max-width:min(505px,82%)}
+  .m.air .bubble{padding:2px 2px;font-size:14.5px;line-height:1.75}
+  /* **粗体** 与 `代码` 的落样式（正文格式化见 md()）——粗体给 600 不用 700：
+     老纸色主题下 700 太重，扫行时抢戏。 */
+  .m .bubble b{font-weight:600}
+  .m .bubble code{font-family:var(--mono);font-size:.92em;background:var(--panel2);
+                  border:1px solid var(--line);border-radius:5px;padding:0 4px}
+
+  /* ---- 消息下方的操作条（复制 / 编辑）----
+     悬停或键盘聚焦才显（**最后一条用户消息常显**——不然你不知道有这两个按钮，
+     无 hover 能力的设备也一律常显）。用 opacity 不用 display：显隐不改布局，
+     鼠标扫过去不会跳。 */
+  .acts{display:flex;align-items:center;gap:2px;margin-top:2px;min-height:24px}
+  .m.user .acts{justify-content:flex-end}
+  .acts button{
+    display:inline-flex;align-items:center;justify-content:center;
+    width:24px;height:24px;padding:5px;border:0;border-radius:24px;
+    background:transparent;color:var(--dim);cursor:pointer;
+  }
+  .acts button:hover{background:var(--panel2);color:var(--fg)}
+  .acts button svg{width:15px;height:15px;display:block}
+  .acts button.ok{color:var(--ok)}
+  .acts button.on{color:var(--acc)}
+  /* 「已停止」（2026-10-07）：她说到一半被叫停——**只标记，不改正文**。
+     有这个标记，"说完了"与"被打断"在记录里分得清（正文一个字都不动）。 */
+  .stopmark{margin-left:6px;font-size:11.5px;color:var(--dim);font-weight:400}
+  @media (hover:hover){
+    .m .acts{opacity:0;transition:opacity 80ms ease}
+    .m:hover .acts,.m:focus-within .acts{opacity:1}
+    /* **最后一轮常显**（2026-10-07）：铅笔与弯箭头藏进悬停里，没人知道有这两个口 */
+    .m.is-last .acts{opacity:1}
+    /* 「后面还有用户消息」的那些用户消息：平时藏，鼠标/键盘落到它上面才显。
+       ⚠️ 这两条必须带上同样的 `:has` 前缀——`:has()` 的特异性算它参数那一段，
+       不重复写就压不过上面那条隐藏规则（Harness 的 CSS 也是这么绕的）。 */
+    .m.user:has(~ .m.user) .acts{opacity:0}
+    .m.user:has(~ .m.user):hover .acts,
+    .m.user:has(~ .m.user):focus-within .acts{opacity:1}
+  }
+
+  /* ---- 编辑一句（只对还没进长期库的那些开放）----
+     改的是**底部输入框**里那份文本（抄 ai-chatbot）：所以这里只把原消息压暗
+     ——它还站在原地、还能对着看，编辑框不另起一个（谁在改哪句由 `#editBar` 说）。 */
+  .m.user.editing .bubble{opacity:.45}
+  .m.user.editing .acts{display:none}
+  .m.sys .bubble{font-size:12.5px;color:var(--dim);border-left:2px solid var(--line);padding:2px 0 2px 10px}
+  /* **动作回执**：air 动过什么必须看得见——不然 air 说"我记下了"，
+     你得去翻记忆才知道到底做没做（可观测是工具箱的兜底） */
+  .m.act .who{color:var(--acc)}
+  .m.act .bubble{font-size:12.5px;border-left:2px solid var(--acc);padding:2px 0 2px 10px;opacity:.9}
+  /* **长回执默认折起来**（2026-09-18）：web_fetch 抓回的正文几千字——整段
+     铺开会把对话淹掉（截图实证）。可观测性不让步：内容一个字没删，只是先
+     收起，点开看全文（带滚动）。折叠方式沿用 `.doc` / `.think` 的既有规矩。 */
+  .fold{max-height:132px;overflow:hidden;cursor:pointer;
+        -webkit-mask-image:linear-gradient(#000 72%,transparent);
+        mask-image:linear-gradient(#000 72%,transparent)}
+  .fold.open{max-height:320px;overflow:auto;cursor:zoom-out;
+             -webkit-mask-image:none;mask-image:none}
+  #wakeWrap.acted #wakeBar{color:var(--acc)}
+
+  /* ---- 「这一轮想起了什么」：折叠条 + 展开详情 ---- */
+  #wakeWrap{border-top:1px solid var(--line);background:var(--panel)}
+  #wakeBar{max-width:720px;margin:0 auto;padding:8px 4vw;display:flex;align-items:center;
+           gap:8px;cursor:pointer;font-size:12.5px;color:var(--dim);user-select:none}
+  #wakeBar:hover{color:var(--fg)}
+  #wakeBar .chev{margin-left:auto;transition:transform .15s;font-size:11px}
+  #wakeWrap.open #wakeBar .chev{transform:rotate(180deg)}
+  #wakeBody{display:none;max-height:40vh;overflow-y:auto;border-top:1px solid var(--line);padding:12px 4vw 16px}
+  #wakeWrap.open #wakeBody{display:block}
+  #wakeBody .box{max-width:720px;margin:0 auto 10px}
+
+  /* 输入区和对话区**用同一套居中线**：外层同样的 4vw 内边距，
+     内层同样的 720px 限宽——两边各限各的，必然对不齐（踩过一次）。 */
+  #composerWrap{padding:12px 4vw 18px;background:transparent}
+  /* 按钮**底部对齐、各自自然高度**：输入框会随内容长高（见 #input），
+     默认的 stretch 会把三个按钮一起拉成柱子。 */
+  #composer{display:flex;align-items:flex-end;gap:8px;max-width:720px;margin:0 auto}
+  /* 输入框**随内容自动长高**，14 行封顶（参考 harness：
+     它的 `--dsh-composer-text-max-height:336px` 就是 14 行；
+     按这里的行高 24px 换算 = 336 + 22 padding + 2 border = 360），
+     到顶后内部滚动。改之前是一条固定 46px 的缝——写长一点就看不见
+     自己写了什么，发出去才发现（2026-09-18 修）。 */
+  #input{
+    flex:1;background:var(--panel);border:1px solid var(--line);color:var(--fg);
+    border-radius:12px;padding:11px 14px;font:inherit;resize:none;box-sizing:border-box;
+    min-height:46px;max-height:360px;overflow-y:auto;
+  }
+  #input:focus{outline:none;border-color:#c9b893;box-shadow:0 0 0 3px rgba(138,106,60,.08)}
+  /* 拖文件过来时给一个落点。**只是放进输入框**，不自动发送——发不发由他定 */
+  #input.dropping{border-style:dashed;border-color:#c9b893;background:var(--panel2)}
+  /* 拖进来的文件**先是一个附件**，不是一坨文字：它保持"文件的样子"，
+     想看想改再展开（展开之后就只是输入框里的文字了） */
+  #attachBar{max-width:720px;margin:0 auto 8px;display:none}
+  #attachBar .att{
+    display:flex;align-items:center;gap:10px;background:var(--panel2);
+    border:1px solid var(--line);border-radius:10px;padding:7px 8px 7px 11px;font-size:13px;
+  }
+  #attachBar .nm{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  #attachBar .warn{color:#c98b6b}
+  #attachBar button{padding:4px 10px;font-size:12.5px}
+  /* air 要改/删时的确认条：**点一下就算数**，不用去猜他一句话是什么意思 */
+  #confirmBar{max-width:720px;margin:0 auto 8px;display:none}
+  #confirmBar .cf{
+    display:flex;align-items:center;gap:10px;background:var(--panel2);
+    border:1px solid #c9b893;border-radius:10px;padding:8px 8px 8px 12px;font-size:13px;
+  }
+  #confirmBar .cfw{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  #confirmBar button{padding:5px 12px;font-size:12.5px}
+  /* 编辑态（2026-10-07）：文本灌回**底部输入框**改，这条只说"在编辑哪一句"。
+     同 confirmBar 一路——它也是"他做了一个动作"的提示条。 */
+  #editBar{max-width:720px;margin:0 auto 8px;display:none}
+  #editBar .ef{
+    display:flex;align-items:center;gap:10px;background:var(--panel2);
+    border:1px solid var(--line);border-radius:10px;padding:7px 8px 7px 12px;font-size:13px;
+  }
+  #editBar .efw{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--dim)}
+  #editBar button{padding:4px 10px;font-size:12.5px}
+  /* 思维链：**默认收起**——air 在想的时候不该刷屏，
+     但想知道 air 在想什么的时候能点开（这才是"不用干等"的正解，比超时掐断好） */
+  .m.think .who{cursor:pointer;opacity:.7}
+  /* 发出的文档在对话里**还是一份文档**（文件卡片 + 点开看全文），
+     不是一坨字——参考各家聊天界面处理附件的通行做法 */
+  .doc{border:1px solid var(--line);border-radius:9px;margin-bottom:6px;cursor:pointer}
+  .docbar{padding:6px 10px;font-size:12.5px;opacity:.8;display:block}
+  .doctext{
+    display:none;white-space:pre-wrap;font-size:12.5px;opacity:.75;
+    max-height:300px;overflow:auto;border-top:1px solid var(--line);padding:8px 10px;
+  }
+  .doc.open .doctext{display:block}
+  .thinkbody{
+    display:none;white-space:pre-wrap;font-size:12.5px;opacity:.75;
+    border-left:2px solid var(--line);padding-left:10px;margin-top:6px;
+    max-height:280px;overflow:auto;
+  }
+  .m.think.open .thinkbody{display:block}
+
+  button{
+    background:var(--panel2);color:var(--fg);border:1px solid var(--line);
+    border-radius:10px;padding:8px 15px;cursor:pointer;font:inherit;font-size:13.5px;
+  }
+  button:hover{background:#e0d7c2}
+  button.primary{background:#8a6a3c;color:#fdfaf3;border-color:#7a5c33}
+  button.primary:hover{background:#7a5c33}
+  /* 不可恢复的动作（彻底删除）：红——它和「归档冷存 / 不删除」不是一类选择 */
+  button.danger{background:#a8412f;color:#fdf6f2;border-color:#8f3626}
+  button.danger:hover{background:#8f3626}
+  button.ghost{background:transparent;color:var(--dim);border-color:transparent}
+  button.ghost:hover{background:var(--panel2);color:var(--fg)}
+  button:disabled{opacity:.5;cursor:default}
+  button.icon{padding:6px 10px;background:transparent;border-color:transparent;color:var(--dim);
+              font-size:15px;display:inline-flex;align-items:center;justify-content:center}
+  button.icon:hover{background:var(--panel2);color:var(--fg)}
+  /* 顶栏那个喇叭：开着的时候用印章色（同"正在生效"的其它地方） */
+  #speakToggle svg{width:16px;height:16px;display:block}
+  #speakToggle.on{color:var(--acc)}
+  /* 顶栏的语音服务开关：开 = 印章色（关 = 灰） */
+  #voicePower.on{color:var(--acc)}
+
+  /* ---- 视图区（原来的底部面板） ---- */
+  #panelView{overflow-y:auto;padding:20px 4vw 32px}
+  #panel{max-width:900px;margin:0 auto}
+  #panel h2{font-size:13px;color:var(--dim);margin:0 0 10px;font-weight:600;letter-spacing:.4px}
+  .box{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:11px 13px;margin-bottom:10px}
+  .kv{display:flex;flex-wrap:wrap;gap:6px;font-family:var(--mono);font-size:12px}
+  .kv span{background:var(--bg);border:1px solid var(--line);border-radius:5px;padding:1px 7px;color:var(--dim)}
+  .kv span.hit{border-color:#bccfae;color:var(--ok)}
+  .row{font-size:12.5px;padding:6px 0;border-bottom:1px dashed var(--line)}
+  .row:last-child{border-bottom:0}
+  .row .t{font-family:var(--mono);color:var(--dim);font-size:11px;margin-right:6px}
+  .why{color:var(--dim);font-size:11.5px;margin-top:3px}
+  .empty{color:var(--dim);font-size:12px;padding:4px 0}
+  table{width:100%;border-collapse:collapse;font-size:12.5px}
+  th{text-align:left;color:var(--dim);font-weight:600;padding:6px 8px;border-bottom:1px solid var(--line);
+     position:sticky;top:0;background:var(--bg)}
+  td{padding:6px 8px;border-bottom:1px solid #e8e0cf;vertical-align:top}
+  tr:hover td{background:#f7f2e6}
+  .mono{font-family:var(--mono);font-size:12px}
+  .tag{display:inline-block;font-size:11px;padding:0 6px;border-radius:8px;border:1px solid var(--line);color:var(--dim);margin-right:4px}
+  .tag.ok{color:var(--ok);border-color:#bccfae}
+  .tag.warn{color:var(--warn);border-color:#ddc9a0}
+  .tag.sen{color:var(--sen);border-color:#cfc0dd}
+  .tag.bad{color:var(--bad);border-color:#ddbdb4}
+  input.f,select.f{background:var(--panel);border:1px solid var(--line);color:var(--fg);border-radius:8px;padding:7px 10px;font:inherit;width:100%}
+  input.f:focus,select.f:focus{outline:none;border-color:#c9b893}
+  .grid2{display:grid;grid-template-columns:120px 1fr;gap:9px 14px;align-items:center;max-width:720px}
+  pre{font-family:var(--mono);font-size:11.5px;color:var(--dim);white-space:pre-wrap;margin:6px 0 0}
+  .drift{color:var(--warn)}
+
+  /* ---- 设置页「人格」块（2026-10-05）----
+     一行一个人格：名字 | 体量 | 动作。编辑框是**整份 md 的纯文本**——
+     不做分节表单：人格是"写给模型看的一段话"，切成几格输入框等于替他把结构定死
+     （出厂三份的章节名是习惯，不是格式）。 */
+  .pRow{display:flex;align-items:center;gap:10px;font-size:12.5px;
+        padding:7px 0;border-bottom:1px dashed var(--line)}
+  .pRow:last-child{border-bottom:0}
+  .pRow .nm{flex:0 0 auto;min-width:130px}
+  .pRow .meta{flex:1;color:var(--dim);font-size:11.5px;font-family:var(--mono)}
+  #pEditor{display:none;margin-top:12px}
+  #pEditor.open{display:block}
+  #pText{width:100%;min-height:280px;background:var(--panel);border:1px solid var(--line);
+         color:var(--fg);border-radius:10px;padding:10px 12px;font-family:var(--mono);
+         font-size:12px;line-height:1.55;resize:vertical;box-sizing:border-box}
+  #pText:focus{outline:none;border-color:#c9b893}
+</style>
+</head>
+<body>
+
+<header>
+  <button class="icon" onclick="toggleNav()" data-tt="收起 / 展开侧栏">☰</button>
+  <h1>air-link-01</h1>
+  <span class="stat" id="hCounts"></span>
+  <span class="spacer"></span>
+  <!-- 和谁聊：切换后她说下一句就换人（选项从 self/personas/ 扫出来） -->
+  <select id="personaSel" data-tt="和谁聊（切换后她说下一句就用新人格）"></select>
+  <span class="pill" id="hVec">语义</span>
+  <span class="pill" id="hLLM">模型</span>
+  <span class="pill" id="hDistill" style="display:none"></span>
+  <!-- 语音服务开关（起 = 几秒；关 = 放显存）。**顶部快捷**，详细设置在「语音」页 -->
+  <button class="ghost" id="voicePower" onclick="toggleVoicePower()">语音：…</button>
+  <!-- 自动朗读：**air 的新回复整轮说完才念**（见 autoSpeak）。
+       状态存 localStorage——它不进提示词、不影响 air 的行为，是"这台浏览器怎么念" -->
+  <button class="icon" id="speakToggle" onclick="toggleSpeakAuto()"></button>
+  <button class="ghost" onclick="refreshAll()" data-t="刷新">刷新</button>
+  <!-- 右列开关（宽屏）：收起 = 唤醒与「更早的对话」整个让位。初始文字由
+       renderAsideBtn() 按语言定（状态在 body.aside-hidden 上，刷新恢复展开） -->
+  <button class="ghost" id="asideBtn" onclick="toggleAside()"
+    data-tt="收起 / 展开右栏（唤醒 · 更早的对话）">收起</button>
+</header>
+
+<main id="main">
+  <nav id="side"></nav>
+  <div id="stage">
+    <!-- 对话：常驻中间 -->
+    <section id="chatView">
+      <div id="msgs"></div>
+      <!-- 右侧栏：宽屏（body.wide）时唤醒条与「更早的对话」都挪到对话右侧
+           （网格定位见 CSS；历史回填在 loadHistory 里两条路）。
+           窄屏不显示——唤醒条与历史回填全部照旧。 -->
+      <aside id="histAside"></aside>
+      <!-- 折叠条：平时只占一行，想知道"为什么想起这些"再点开 -->
+      <div id="wakeWrap">
+        <div id="wakeBar" onclick="toggleWake()">
+          <span id="wakeSummary" data-t="还没说话">还没说话</span>
+          <span class="chev">▼</span>
+        </div>
+        <div id="wakeBody">
+          <div class="box" id="wakeCues"><div class="empty" data-t="还没说话">还没说话</div></div>
+          <div class="box" id="wakeMem"><div class="empty">—</div></div>
+          <!-- 「air 这轮看到的短期窗口」：填充在 refreshHeader（数据来自 /api/state） -->
+          <div class="box" id="wakeWindow" style="display:none"></div>
+        </div>
+      </div>
+      <div id="composerWrap">
+        <div id="attachBar"></div>
+        <div id="confirmBar"></div>
+        <!-- 编辑这一句（2026-10-07 抄 ai-chatbot）：**文本回到底部输入框**，
+             这里只放"正在编辑 + 取消"一条——不自造第二个编辑框
+             （旧那套内联 textarea 是自造的，键位还和输入框反着）。 -->
+        <div id="editBar"></div>
+        <div id="composer">
+          <textarea id="input" data-tp="说点什么…（Enter 发送，Shift+Enter 换行）"
+            data-tt="把文本文件拖到这里：先当附件收着（不占输入框），发送时跟这条一起发过去；想先看想改，点附件上的「展开改写」"></textarea>
+          <button class="primary" id="sendBtn" onclick="send()" data-t="发送">发送</button>
+          <!-- 停止：只在生成中现（**生成中才挡得住**——见 busy）。
+               点了就断流：她已经说出口的那半句**留在这一段对话里**（后端
+               `chat._commit_partial_turn` 落窗口、标 `interrupted`），但它
+               **不进长期记忆**（提取时滤掉）——所以这是"说到一半"，不是"这一轮作废"。 -->
+          <button class="ghost" id="stopBtn" onclick="stopTurn()" style="display:none"
+            data-tt="中断这一轮：她说到一半的那半句留在这段对话里（**不进长期记忆**——以后她不会记得自己说过这句）。想接着听，用「重新生成」——那是把这一轮原样重说一遍，不是从那半句续写" data-t="停止">停止</button>
+          <button class="ghost" id="newBtn" onclick="newSession()" data-tt="把这一段收进记忆（提取成场景卡），清掉对话上下文，重新开一段；整理在后台跑（画像在「画像」页看）" data-t="新对话">新对话</button>
+        </div>
+      </div>
+    </section>
+    <!-- 其它视图：从左侧点进来，盖住对话 -->
+    <section id="panelView" style="display:none"><div id="panel"></div></section>
+  </div>
+</main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const esc = (s) => (s ?? "").toString().replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+/* 消息正文的轻量格式化：**粗体** 与 `代码`——先 esc 再上标签，注入不进内容。
+   叫 md 不叫 fmt：`fmt` 已被下面面板的数字格式化（toFixed）占用——同名 `const`
+   在同一个 <script> 里是**语法错误、整页脚本全挂**，撞过一次（2026-09-19）。
+   记号必须**紧贴内容**（`**` 后紧跟非空白）：「a ** b ** c」这类数学式、
+   「**kwargs」这类代码不会被误吞。换行不归它管——`.bubble` 的
+   white-space:pre-wrap 已经在管。 */
+const md = (s) => esc(s)
+  .replace(/\*\*(\S(?:[^*\n]*\S)?)\*\*/g, "<b>$1</b>")
+  .replace(/`([^`\n]+)`/g, "<code>$1</code>");
+
+/* ---------- 双语（中 / 英，2026-09-17）----------
+   语言存在后端 `user_prefs.lang`（设置页切），页面启动时从 `/api/state` 取；
+   切换 = 保存 + reload——静态和动态文案都按新一轮渲染，最干净。
+
+   机制：**中文原文就是 key**（`t("保存")`）。`I18N.en` 里只放英文翻译，
+   中文模式下不查字典、直接返回原文——默认路径零维护。
+   带参数的写成模板：`t("已保存 {n} 项", {n: 3})`。
+   **数据不翻**（记忆 / 场景 / 画像的内容用它们本来的语言），只翻界面自己的话。 */
+let LANG = "zh";
+/* 英文表：**只写翻译**（中文原文即 key）。带 `{n}` 的是模板，参数由调用方给。
+   没收录的 key 在英文模式下会原样显示中文——漏一条就漏一条，不会炸。 */
+const I18N = {en: {
+  /* ---- 顶栏 / 对话区 ---- */
+  "air-link-01 · 记忆实验台": "air-link-01 · Memory Workbench",
+  "刷新": "Refresh",
+  "收起 / 展开侧栏": "Collapse / expand sidebar",
+  "收起 / 展开右栏（唤醒 · 更早的对话）": "Collapse / expand the right column (wake · earlier conversation)",
+  "收起": "Collapse",
+  "展开": "Expand",
+  "还没说话": "Nothing yet",
+  "语义": "Semantic",
+  "模型": "Model",
+  "语义 ✓": "Semantic ✓",
+  "语义 ✗": "Semantic ✗",
+  "语义 未配": "Semantic unset",
+  "语义 未测试": "Semantic untested",
+  "模型 ✓": "Model ✓",
+  "模型 ✗": "Model ✗",
+  "模型 未配": "Model unset",
+  "模型 未测试": "Model untested",
+  /* 服务灯的 tooltip（2026-09-25）：勾只给结论，失败的原因和时间在悬停里。
+     「未测试」是刻意选的中性词："待用"会读成"服务好着、只是没在用"，
+     "未连接"会读成"试过、连不上"——两种误读都往一个确定的结论上带，
+     而这一档的实话是"还不知道"。 */
+  "最近成功 {t}": "Last ok {t}",
+  "最近失败 {t}（{e}）": "Last failed {t} ({e})",
+  "还没调用过——配置在，第一次对话就会验证它": "Not called yet — configured; the first chat turn will test it",
+  "key 不对（401）": "Bad key (401)",
+  "被限流（429）": "Rate limited (429)",
+  "超时": "Timed out",
+  "连不上": "Unreachable",
+  "失败": "Failed",
+  "整理中…": "Distilling…",
+  "说点什么…（Enter 发送，Shift+Enter 换行）": "Say something… (Enter to send, Shift+Enter for a new line)",
+  "把文本文件拖到这里：先当附件收着（不占输入框），发送时跟这条一起发过去；想先看想改，点附件上的「展开改写」": "Drop a text file here: it's held as an attachment (it doesn't take over the box) and goes out with this message — hit \"Expand to edit\" on it if you want a look or a tweak first.",
+  "发送": "Send",
+  "新对话": "New chat",
+  "把这一段收进记忆（提取成场景卡），清掉对话上下文，重新开一段；整理在后台跑（画像在「画像」页看）": "Put this stretch into memory (extracted into scene cards), clear the conversation context and start a new one; distillation runs in the background (portraits appear on the Portraits page)",
+  "状态读取失败：": "Failed to read state: ",
+  "场景 <b>{n}</b> · 原文 <b>{d}</b> 天 · 摘要 <b>{s}</b> · 画像 <b>{p}</b> · 备忘录 <b>{o}</b> · 实体 <b>{e}</b>": "Scenes <b>{n}</b> · Raw <b>{d}</b>d · Summaries <b>{s}</b> · Portraits <b>{p}</b> · Memos <b>{o}</b> · Entities <b>{e}</b>",
+  " · 冷层 <b>{n}</b>": " · Cold <b>{n}</b>",
+  "{p} 这轮看到的短期窗口（〔更早〕+〔最近〕）：": "The short-term window {p} sees this turn ([earlier] + [recent]):",
+
+  /* ---- 导航 / 页说明 ---- */
+  "对话": "Chat",
+  "档案": "Facts",
+  "画像": "Portraits",
+  "场景": "Scenes",
+  "摘要": "Summaries",
+  "备忘录": "Memos",
+  "实体": "Entities",
+  "主题": "Topics",
+  "打捞": "Salvage",
+  "留痕": "Traces",
+  "语音": "Voice",
+  "设置": "Settings",
+  "关于用户": "About the user",
+  "系统": "System",
+  "记忆库": "Memory",
+  "用户自己填的事实。和「画像」分开存——那边是 {p} 的推测，这边不需要印证。": "Facts the user entered; stored apart from Portraits — those are {p}'s inferences; these need no corroboration.",
+  "{p} 的推测。攒够 3 次同情境印证才成立，觉得不对可以直接否决。": "{p}'s inferences. A portrait only stands after 3 corroborations in similar situations; if one feels wrong, veto it outright.",
+  "每段对话落成的一张卡——长期记忆的主体。": "One card per stretch of conversation — the backbone of long-term memory.",
+  "同一主题攒够几条场景后，聚合出来的一层。": "A layer aggregated once a topic has enough scenes.",
+  "还没了结的事。到期就进注入，一轮最多一件——提不提、怎么提是话里的分寸。": "Unfinished matters. When due it enters the injection, at most one per turn — whether and how to bring it up is a matter of wording.",
+  "用户反复提到的人和地方。": "People and places the user keeps mentioning.",
+  "名字写歪了的主题——疑似同一件却被写成两种说法，合不合并由你点头。": "Topics written askew — likely one thing under two names; merging is your call.",
+  "翻原文。删掉的是「理解」，原文还在——要找回什么就到这儿翻。": "Search the raw transcripts. Deletion removes interpretations, not the raw text — dig here to recover something.",
+  "{p} 每次开口前的判断都记在这儿，一行一次——「她怎么没想起那件事」到这儿翻。她的手（工具）、备忘录进出、整理与漂移也一并落在这里。": "Every judgement {p} makes before speaking is logged here, one line per turn — this is where you look up \"why didn't she remember that?\". Her tool calls, memo changes, maintenance runs and drift checks land here too.",
+  "{p} 的声音。可选外挂（独立服务），没起也不影响聊天。": "{p}'s voice. An optional add-on (a separate service); chat works fine without it.",
+  "模型服务的连接与凭据、语言，以及人格（新建 / 编辑 / 停用）。": "Model connections and credentials, language, and personas (create / edit / disable).",
+
+  /* ---- 气泡署名 / 通用 ---- */
+  "你": "You",
+  "{p} 在想…": "{p} is thinking…",
+  "想了 {s}（点开看 {p} 怎么想的）": "Thought for {s} (click to see how {p} thinks)",
+  "想了 {s}": "Thought for {s}",
+  "复制": "Copy",
+  "已复制": "Copied",
+  /* 编辑（铅笔）= 改这句重发；重新生成（弯箭头）= 原样再来一遍。
+     两件事分开：一个按钮兼两义，提示语就只能写得又长又绕（2026-10-07 改）。 */
+  "编辑这句（改完从这里重发；它后面那些会一起撤掉）": "Edit this line (resend from here; everything after it is dropped)",
+  "重新生成（从这一轮原样重来；它后面那些会一起撤掉）": "Regenerate (redo this turn; everything after it is dropped)",
+  "正在编辑这一句——改完按「发送」重发，它后面那 {n} 轮会一起撤掉": "Editing this line — hit Send to resend; the {n} turn(s) after it will be dropped",
+  "重新生成": "Regenerate",
+  "等这一轮说完再动它。": "Wait until this turn is finished.",
+  "改这句…（Enter 保存并重发，Esc 取消）": "Edit this line… (Enter saves & resends, Esc cancels)",
+  "正在编辑这一句——改完按「发送」重发": "Editing this line — hit Send to resend it",
+  "取消": "Cancel",
+  "停止": "Stop",
+  "（已停止）": "(stopped)",
+  "中断这一轮：她说到一半的那半句留在这段对话里（**不进长期记忆**——以后她不会记得自己说过这句）。想接着听，用「重新生成」——那是把这一轮原样重说一遍，不是从那半句续写": "Stop this turn: the half sentence stays in this conversation only (**not in long-term memory** — she will not remember saying it). To hear it through, hit Regenerate — that redoes the whole turn, it does not continue from the half sentence",
+  "撤不了这一轮": "Can't undo this turn",
+  "没重说成：": "Resend failed: ",
+  /* 分不清状态时的三条交代（见 `resyncChat`）：`{w}` 按路填——撤不成 / 断在半路 */
+  "这一轮已经不在窗口里了": "this turn is no longer in the window",
+  "重发没走完": "the resend didn't finish",
+  "这一轮断在半路": "this turn broke off halfway",
+  "（{w}，也读不到服务端的现状——刷新一下页面看真实情况）": "({w}; and the server's current state can't be read either — refresh the page to see the truth)",
+  "（{w}——已按服务端的现状把这一段重新对上）": "({w} — this stretch has been re-synced with the server's current state)",
+  /* 「停止」那半截留着（2026-10-07 抄 AI SDK：停止时保存 assistant 快照）——
+     这一轮**算数**：能改、能重新生成、刷新也还在（见 streamTurn 的 AbortError 分支）。 */
+  "朗读": "Read aloud",
+  "停止朗读": "Stop reading",
+  "正在念…（再点一下停）": "Reading… (click again to stop)",
+  "正在生成语音…（再点一下取消）": "Generating voice… (click again to cancel)",
+  "（一段代码）": "(a code block)",
+  "（这一轮 {p} 没说话。）": "({p} said nothing this turn.)",
+  "这一轮没成：": "This turn failed: ",
+
+  /* ---- 唤醒面板 ---- */
+  "C1 语义": "C1 semantic", "C2 时态": "C2 tense", "C3 情感": "C3 affect",
+  "C4 自我相关": "C4 self-relevant", "C5 自指": "C5 self-reference",
+  "C6 新鲜": "C6 freshness", "C7 未决": "C7 unresolved",
+  "实体命中": "entity hit", "字面命中": "literal hit",
+  "票 {n}": "{n} votes", "含强维": "has a strong dim",
+  "→ 给原文": "→ raw text given", "不够，不给原文": "not enough — no raw text",
+  "R0 判「不翻」": "R0 ruled \"don't dig\"",
+  "候选都没过相关性门": "no candidate passed the relevance gate",
+  "原文": "Raw",
+  "已立": "established",
+  "猜测": "guess",
+  "到点": "due",
+  "手上有": "on hand",
+  "相关": "relevant",
+  "最近": "recent",
+  "追问": "he asked",
+  "这一轮没想起东西（{why}）": "Nothing surfaced this turn ({why})",
+  "没被带上：": "Left out: ",
+  "上下文超预算（{a} → {b} / {c}），裁掉：": "Over budget ({a} → {b} / {c}), dropped: ",
+  "当前消息本身就 {a} / {b}：记忆全裁了也装不下，正文可能被截断": "The current message alone is {a} / {b}: even with all memory cut it won't fit — the reply may be truncated",
+  "{p} 动手": "{p} acted",
+  "提示：你们聊过这个": "Note: you've talked about this before",
+  "这一轮没有注入记忆": "No memory injected this turn",
+  "这一轮想起 {n} 条场景": "Recalled {n} scenes this turn",
+  " · {n} 条常驻画像": " · {n} standing portraits",
+  "这一轮没有想起具体的场景（只注入了常驻画像）": "No specific scenes surfaced this turn (only standing portraits)",
+  " · {p} 动过 {n} 下": " · {p} acted {n} time(s)",
+  "（{ok} 成、{bad} 没成）": " ({ok} done, {bad} failed)",
+  "（都成了）": " (all done)",
+  " —— 点开看为什么": " — click to see why",
+
+  /* ---- 系统回执 ---- */
+  "（无）": "(none)",
+  "执行": "Do it",
+  "算了": "Never mind",
+  "没做成：": "Failed: ",
+  "{p} 做了": "{p} did",
+  "没做成": "failed",
+  " · 点开看全文": " · click to see full text",
+  "{p} 想把这几条列出来处理：{ids}": "{p} wants to handle these: {ids}",
+  "{p} 想把 {id}「{title}」列出来处理": "{p} wants to decide on {id} \"{title}\"",
+  "不删除": "Keep",
+  "归档冷存": "Archive",
+  "彻底删除": "Delete for good",
+  "没动它": "Nothing touched.",
+  "{p} 想把 {id}「{title}」改成「{text}」": "{p} wants to change {id} \"{title}\" to \"{text}\"",
+  "（改{field}）": " (change the {field})",
+  "{n} 条（{ids}）": "{n} items ({ids})",
+  "（这段被额度截断了——把设置里的 max_tokens 调大，或者把话拆小一点）": "(Cut off by the token limit — raise max_tokens in Settings, or split it smaller.)",
+  "这一段收进记忆了 → {id}「{title}」": "This stretch is in memory → {id} \"{title}\"",
+  "这一段没什么要记的（窗口空）": "Nothing worth keeping here (window empty)",
+  "新的一段，从这里开始。": "A new stretch starts here.",
+  "新对话失败：": "New chat failed: ",
+  "开始整理（后台跑：聚合摘要 → 抽象画像 → 收敛 → 老化）": "Distillation started (background: aggregate summaries → abstract portraits → converge → age out)",
+  "已经在整理中了": "Already distilling",
+  "整理失败：": "Distillation failed: ",
+  "—— 更早的对话（原文 · 已进长期库）——": "— Earlier conversation (raw · in long-term memory) —",
+  "更早的对话（压缩摘要）": "Earlier conversation (compressed digest)",
+  "摘要批（点开看）": "Digest batch (click to open)",
+  /* 侧栏（对话右列）里的文案：标题 / 注脚 */
+  "已进长期库。全文在「打捞」，结构化记忆在「场景」。": "In long-term memory. Full text under Salvage; structured memories under Scenes.",
+  "压缩摘要": "Compressed digest",
+  "读取失败：": "Failed to load: ",
+
+  /* ---- 档案页 ---- */
+  "保存": "Save",
+  "加一项": "Add a field",
+  "清空一格 = 让 {p} 忘掉这条。保存后下一句生效。": "Clearing a field = letting {p} forget it. Takes effect on the next message.",
+  "已保存 {n} 项（清空的那些已经忘掉了）。": "Saved {n} field(s) (cleared ones are forgotten).",
+  "保存失败：": "Save failed: ",
+  "新增哪一项？（例如：家乡 / 生日 / 想被怎么称呼）": "Add which field? (e.g. hometown / birthday / how you'd like to be addressed)",
+  "{p} 推的": "{p} inferred",
+  "（没填）": "(empty)",
+  "（空）": "(none)",
+
+  /* ---- 画像页 ---- */
+  "刚聊完、还没形成画像时，点右边跑一遍。": "Right after a chat, when no portrait has formed yet, hit the button to run it.",
+  "重新整理": "Run distillation",
+  "上次整理：": "Last run: ",
+  "S2 新增 {a} · S3 新增 {b} · 维持 {c} · 修正 {d} · 收敛 {e} · 老化 {f}": "S2 +{a} · S3 +{b} · held {c} · revised {d} · converged {e} · aged {f}",
+  "上次体检（{why}）：": "Last checkup ({why}): ",
+  "复核 {n} 条：降档 {d} · 复查降 {g} · 重写 {r} · 建议删 {w}": "Reviewed {n}: downgraded {d} · gate-regressed {g} · reworded {r} · suggested deletion {w}",
+  "{p} 的复核提议（{n} 条）：复查后觉得不对，等你裁决——删掉要你点，{p} 不会自己动。": "{p}'s review proposals ({n}): after a recheck {p} thinks these don't hold. Your call — nothing gets deleted unless you say so.",
+  "理由：": "Reason: ",
+  "（没给理由）": "(no reason given)",
+  "删除": "Delete",
+  "留着": "Keep",
+  "还没跑过整理。": "No distillation run yet.",
+  "未收敛（为什么没立）：": "Unconverged (why not established): ",
+  "还没有画像——再多聊几轮，或点「重新整理」看看现在能抽出什么。": "No portraits yet — chat a few more rounds, or run distillation to see what can be drawn out now.",
+  "陈述": "Statement",
+  "状态": "Status",
+  "印证": "Evidence",
+  "依据": "Basis",
+  "◆ 出处": "◆ origin",
+  "· 印证": "· support",
+  "另有 {n} 条依据涉及隐私，未展示": "{n} more supporting items are private and hidden",
+  "不对": "Wrong",
+  "模式统计（人做不到，{p} 可以）": "Pattern stats (things a human can't hold, {p} can)",
+  "情境 × 对象": "Situation × target",
+  "次数": "Count",
+  "典型反应": "Typical response",
+  "面对【{a}】的【{b}】": "Facing [{a}] · [{b}]",
+  "——右边「不对」即可删掉它；「改」走修正（旧版进历史、新版重新攒印证）。": " — click \"Wrong\" to delete it; \"Edit\" goes through revision (old wording to history, new one re-collects evidence).",
+  "改成什么？（{id} 的陈述）\n\n改完之后是**新判断**：旧说法进历史，新说法回去重新攒印证。": "New statement for {id}?\n\nThis becomes a NEW inference: the old wording goes to history, and the new one starts collecting evidence again.",
+  "删掉 {id}「{statement}」？\n\n素材都在（原话 / 场景 / 摘要）——这条判断真成立的话，以后会重新立出来。": "Delete {id} \"{statement}\"?\n\nThe material is all here (raw log / scenes / summaries) — if this holds, it'll be re-established later.",
+  "没找到这条画像": "Portrait not found",
+  "已删掉 {id}。": "Deleted {id}.",
+  "删除失败：": "Delete failed: ",
+  "改主题": "Change topic",
+  "新主题是什么？（{id}）\n\n1-3 个，逗号隔开（第一个是主主题）。改的是归类：叙述和它的素材都不动。": "New topic(s) for {id}?\n\n1-3 topics, comma-separated (the first is the primary). Only the grouping changes — the narrative and its material stay untouched.",
+  "新主题是什么？（{id}）\n\n1-3 个，逗号隔开（第一个是主主题）。改的是归类：判断本身不动，依据和印证照旧。": "New topic(s) for {id}?\n\n1-3 topics, comma-separated (the first is the primary). Only the grouping changes — the inference, its basis and support stay as they are.",
+
+  /* ---- 场景页 ---- */
+  "还没有场景。聊几句 → 新对话（或话题切换）就会提取。": "No scenes yet. Chat a bit → start a new chat (or switch topics) and they'll be extracted.",
+  "批量删…": "Delete many…",
+  "编号用逗号隔开；删=真删（没备份），要留后路用「归档」——归档的还能回热层。": "Separate ids with commas; delete = gone for good (no backup) — to keep a way back use Archive (archived ones can be restored).",
+  "标题 / 摘要": "Title / digest",
+  "情境 → 反应": "Situation → response",
+  "情绪": "Affect",
+  "强度": "Intensity",
+  "计数": "Counts",
+  "操作": "Actions",
+  "敏感": "Sensitive",
+  "冷层": "Cold",
+  "无vec": "no vec",
+  "提{m} 引{c}": "m{m} c{c}",
+  "改": "Edit",
+  "删": "Del",
+  "归档": "Archive",
+  "回热层": "Restore",
+  "要删哪些？编号用逗号或空格隔开\n（例如 S1-0001,S1-0003）": "Delete which? Separate ids with commas or spaces\n(e.g. S1-0001, S1-0003)",
+  "真删掉这 {n} 条？\n{ids}\n\n没有备份，删了就没了——要留后路请用「归档」。": "Really delete these {n}?\n{ids}\n\nNo backup — gone for good. To keep a way back, use Archive.",
+  "没成": "Failed",
+  "操作失败：": "Action failed: ",
+  "没动——它已经在那个状态了。": "Nothing changed — already in that state.",
+  /* 记忆动作的统一口（三层同一套，2026-09-24）：提示用复数 {ids}，一次多条也说得通 */
+  "已删 {ids}——真删，没有备份。": "Deleted {ids} — for good, no backup.",
+  "已归档 {ids}——{p} 不会再想起它，数据都在，还能捞回来。": "Archived {ids} — {p} won't recall it; data stays and can be restored.",
+  "已把 {ids} 放回热层。": "{ids} back in the hot layer.",
+  "改成什么？（{id} 的叙述）": "New text for {id}? (summary)",
+  "改哪个字段？（摘要 / 标题 / 主题 / 事件时间 / 情境 / 反应 / 情境类）": "Which field? (digest / title / topic / event time / situation / response / situation class)",
+  "改成什么？（{id} 的{field}）": "New {field} for {id}?",
+  "已改 {id}：旧值留在留痕里了。": "Updated {id}: the old value is in the traces.",
+  "真删掉 {id}？\n\n没有备份，删了就没了——要留后路请用「归档冷存」。": "Really delete {id}?\n\nNo backup — gone for good. To keep a way back, use Archive.",
+
+  /* ---- 摘要 / 备忘录 / 实体 ---- */
+  "还没有摘要——同一主题攒够 3 条场景才聚合。": "No summaries yet — a topic aggregates once it has 3 scenes.",
+  "聚合叙述": "Aggregate narrative",
+  "原料": "Sources",
+  "还没有备忘录。": "No memos yet.",
+  "事项": "Item",
+  "{n} 步": "{n} steps",
+  "内容": "Content",
+  "来源": "Source",
+  "时间依据": "Basis",
+  "明说 {d}": "stated {d}",
+  "天": "d",
+  "已到期": "due now",
+  "到点了": "due now",
+  "{p} 的承诺": "{p}'s promise",
+  "用户的事": "user's matter",
+  "不提": "hidden",
+  /* 备忘录面板（对话右侧，随手划——2026-09-21） */
+  "备忘录 · {n} 件（点开划掉）": "Memos · {n} (click to clear)",
+  "备忘录 · {n} 件（点收起）": "Memos · {n} (click to fold)",
+  "划掉": "Clear",
+  "划不掉：": "Can't clear: ",
+  "用户说的事": "the user's matter",
+  "你答应的事": "your promise",
+  "到期": "due",
+  "还没有实体。": "No entities yet.",
+  "名称": "Name",
+  "类别": "Kind",
+  "关系": "Relation",
+  "别名": "Aliases",
+  "关联场景": "Scenes",
+  "最近交互": "Last seen",
+  "活跃": "Active",
+  "并到…": "Merge into…",
+  "把「{name}」并进哪个实体？填它的名字：": "Merge “{name}” into which entity? Type its name:",
+  "没找到叫「{name}」的实体。": "No entity named “{name}”.",
+  "只有一个实体，没有可并的对象。": "Only one entity — nothing to merge into.",
+  "把「{a}」并进「{b}」？\n\n它名下 {n} 条场景会改挂过去，不删记录、会留痕。\n合并不可撤回——只能反着再合一次。": "Merge “{a}” into “{b}”?\n\nIts {n} scenes will be re-linked; nothing is deleted and a trace is kept.\nA merge cannot be undone — only merged back the other way.",
+  "已合并：{n} 条场景改挂到「{b}」，{k} 个别名并了过去。": "Merged: {n} scenes re-linked to “{b}”, {k} aliases carried over.",
+
+  /* ---- 打捞页 ---- */
+  "找什么（可空 = 只按日期）": "Find what (empty = date only)",
+  "从哪天": "From date",
+  "到哪天": "To date",
+  "翻一下": "Dig",
+  "填个词或选个日期，点「翻一下」。": "Type a word or pick a date, then hit Dig.",
+  "这个范围里没有。换个词，或者把日期放宽。": "Nothing in this range. Try another word, or widen the dates.",
+  "编号": "Id",
+  "日期 时间": "Date time",
+  "原文片段": "Raw excerpt",
+  "库里": "In library",
+  "在": "In",
+  "已删": "Deleted",
+  "重新记下": "Re-record",
+  "翻原文中…": "Digging through raw text…",
+  "没查成：": "Search failed: ",
+  "照着原文重新记一遍 {id}？\n\n这会新起一条记忆（新编号），\n不是撤销删除——删掉的就是删掉了（要留后路，删之前用「归档」）。": "Re-record {id} from the raw text?\n\nThis creates a new memory (new id); it is not an undo — a deletion is a deletion (if you want a way back, use Archive before deleting).",
+  "记下了": "Recorded",
+  "没做成：": "Failed: ",
+
+  /* ---- 留痕页 ---- */
+  "还没有留痕。每次唤醒都会落一行。": "No traces yet. Every wake writes a line.",
+  "动作": "Actions",
+  "召回": "Recalled",
+  "抑制": "Suppressed",
+  "漂移检测": "Drift check",
+  /* 留痕页其余几类（2026-10-07 补齐：这一页原来只有唤醒/备忘/漂移三种渲染，
+     工具、档案、场景改动、否决全掉进 else 被当成漂移检测） */
+  "工具": "Tool",
+  "体检": "Maintenance",
+  "档案改动": "Fact change",
+  "新增": "added",
+  "场景改动": "Scene change",
+  "否决画像": "Portrait rejected",
+  "备忘": "Memo",
+  "关闭": "closed",
+  "变更": "updated",
+  "命中判定（用户给了结果）": "hit judged (the user gave a result)",
+  "命中判定": "hit judged",
+  "超期退役": "retired (past its window)",
+  "她调工具": "she called the tool",
+  "用户随手划": "the user crossed it off",
+  "，修正 ": ", revised ",
+  "检查 {n} 个主题，漂移 {m} 个": "Checked {n} topics, {m} drifting",
+
+  /* ---- 主题页 ---- */
+  "没有可疑的重复主题。": "No suspicious duplicate topics.",
+  "系统不会自己合——只改归属、不删记录，会留痕。": "The system never merges by itself — it only reassigns, never deletes, and leaves a trace.",
+  "并掉": "Merge",
+  "并入": "Into",
+  "相似度": "Similarity",
+  "{n} 条": "{n} item(s)",
+  "把「{from}」并入「{to}」？\n\n只改归属，不删记录，会留痕。": "Merge \"{from}\" into \"{to}\"?\n\nOnly reassigns, never deletes, and leaves a trace.",
+  "已合并 {n} 条记录。": "Merged {n} record(s).",
+  "合并失败：": "Merge failed: ",
+
+  /* ---- 设置页 ---- */
+  "{p} 怎么跟我说话": "How {p} talks to me",
+  "语言": "Language",
+  "仪表盘和 {p} 的输出都跟着切（页面会刷新一下）。": "Both the dashboard and {p}'s output switch (the page reloads).",
+  "{p} 的声音在左侧「语音」页。": "{p}'s voice lives on the Voice page.",
+  "已保存，下一句就生效。": "Saved; applies from the next sentence.",
+  "切换语言失败：": "Language switch failed: ",
+
+  /* ---- 设置页「人格」块（2026-10-05）---- */
+  "人格": "Personas",
+  "人格文件在 self/personas/ 下——她是谁，来这儿定。改完下一句就生效；记忆不跟着分家：换谁说话，看到的都是同一份记忆。":
+    "Persona files live under self/personas/ — who she is gets decided here. Changes apply from her next sentence; memory is not split — whoever speaks sees the same memory.",
+  "已停用「{name}」——正在用的就是它，已切回 {p}。": "Disabled \"{name}\" — it was the current one, switched back to {p}.",
+  "字": "chars",
+  "在用": "current",
+  "内置": "built-in",
+  "停用中": "disabled",
+  "常驻块": "fixed blocks",
+  "（停用中，不占提示词）": "(disabled — costs no prompt)",
+  "新建人格": "New persona",
+  "编辑": "Edit",
+  "停用": "Disable",
+  "恢复": "Restore",
+  "超了预算": "over budget",
+  "字数 {n}": "{n} chars",
+  "常驻块约 {a} / {b}": "fixed blocks ≈ {a} / {b}",
+  "常驻块预算上限 {b}（新建后计入）": "fixed-block budget {b} (counted once created)",
+  "新建人格：id 只用小写英文 / 数字 / `_` / `-`（2–16 位）——它会写进对话原文的署名，中文和符号会让原文解析认不出人。":
+    "New persona: the id uses lowercase letters / digits / `_` / `-` (2–16) — it gets written into transcript bylines, so CJK or punctuation would break transcript parsing.",
+  "编辑「{name}」——整份文件都会原样给 {p} 看（章节名只是习惯，不是格式）。":
+    "Editing \"{name}\" — the whole file goes to {p} verbatim (section titles are a habit, not a format).",
+  "保存失败：": "Save failed: ",
+  "保存失败": "Save failed",
+  "已保存「{name}」——下一句起就用新的。": "Saved \"{name}\" — effective from her next sentence.",
+  "没改动。": "No changes.",
+  "建好了「{name}」——想用就在顶栏「和谁聊」里切过去。": "Created \"{name}\" — switch to it in the top-bar \"who to talk with\" picker.",
+  "停用「{name}」？文件会改名成 .md.off——不删，随时能恢复。": "Disable \"{name}\"? The file is renamed to .md.off — not deleted, restorable anytime.",
+  "恢复「{name}」？": "Restore \"{name}\"?",
+  "服务": "Service",
+  "预设": "Preset",
+  "套用": "Apply",
+  "结果": "Result",
+  "语义 endpoint": "Semantic endpoint",
+  "语义 model": "Semantic model",
+  "语义 key": "Semantic key",
+  "语义证书校验": "Semantic TLS",
+  "校验（默认；公网端点别关）": "Verify (default; keep on for public endpoints)",
+  "放宽（自签 / 内网端点才用）": "Relaxed (self-signed / LAN endpoints only)",
+  "— 留空表示不改": "— leave empty to keep",
+  "（本地 Ollama 填 ollama）": "(use \"ollama\" for a local Ollama)",
+  "测试 LLM": "Test LLM",
+  "测试语义": "Test semantic",
+  "已保存，客户端已重建。": "Saved; clients rebuilt.",
+  "套用失败：": "Apply failed: ",
+  "测试中…": "Testing…",
+  "测试失败：": "Test failed: ",
+  "{tag}.{name} 正被环境变量 {env} 覆盖，改这里不生效": "{tag}.{name} is overridden by env var {env} — edits here won't take effect",
+  "{tag} 的 key 是打码值，请重新填一次": "{tag}'s key is a masked value — please enter it again",
+  "优先级（低→高）：默认值 < AIR2_*（求知版遗留）< config.local.json < AIR_LINK_*。": "Priority (low→high): defaults < AIR2_* (legacy) < config.local.json < AIR_LINK_*.",
+  "key 留空表示「不改动」，不会把已保存的 key 抹掉。": "An empty key field means \"no change\" — the stored key is never wiped.",
+  "这个文件已加进 .gitignore——key 不会进版本库。": "This file is in .gitignore — keys never enter version control.",
+  "DeepSeek 不提供 embedding 接口；语义服务留空也能跑（降级成字符重叠，检索会变糙）。": "DeepSeek offers no embedding API; the semantic service can stay empty (it degrades to character overlap and retrieval gets rougher).",
+  "退出": "Quit",
+  "全退出": "Quit all",
+  "「全退出」= 先收掉语音服务（放掉显存），再关仪表盘自己——顺序反了就没人收那个进程了。": "\"Quit all\" = take the voice service down first (freeing VRAM), then the dashboard itself — reversed order leaves nobody to reap that process.",
+  "下次双击 启动.vbs 就回来：它一起把语音服务也拉起来，而且不挂黑框。": "Next time, double-click 启动.vbs — it brings the voice service up too, with no console window.",
+  "全退出？\n\n会关掉语音服务（放掉显存）和仪表盘本身。\n下次双击「启动.vbs」就回来。": "Quit everything?\n\nCloses the voice service (frees VRAM) and the dashboard itself.\nNext time, double-click 启动.vbs.",
+  "正在退出…": "Quitting…",
+  "已退出。": "Quit.",
+  "语音服务（含显存）也收干净了。这个页面可以关掉；下次双击「启动.vbs」就回来。": "The voice service (VRAM included) is cleaned up. You can close this page; next time double-click 启动.vbs.",
+
+  /* ---- 语音页 ---- */
+  "语音服务": "Voice service",
+  "状态": "Status",
+  "起 / 关都在顶栏那颗「语音」按钮上（关 = 放显存）。模型到第一次播报才读——要等十几秒。": "Start/stop lives in the top-bar Voice button (stop = free VRAM). Weights load on the first utterance — expect a dozen seconds.",
+  "声音模型": "Voice model",
+  "改的是 tts/voice.json——保存后要点「保存并重启」才生效。": "Edits tts/voice.json — save, then \"save & restart\" to apply.",
+  "精度": "Precision",
+  "设备": "Device",
+  "空闲卸载": "Idle unload",
+  "分钟没念就放掉显存（0 = 一直占着）": "Free VRAM after N idle minutes (0 = keep loaded)",
+  "保存并重启语音服务": "Save & restart voice service",
+  /* 语音页·模型区（2026-09-20）：候选按钮 + 当前模式提示 */
+  "点一下填入（也可以自己写 HF 仓库名）：": "Click to fill (or type an HF repo name):",
+  "（克隆）": " (clone)",
+  "语音服务没起——起来后这里显示当前模式。": "Voice service is down — the current mode shows here once it starts.",
+  "现在：克隆模式——{p} 用参考音频（{ref}）的声音说话。": "Now: clone mode — {p} speaks with the voice of the reference audio ({ref}).",
+  "现在：克隆模式，但参考音频没配上（voice.json 的 ref_audio）——播报会报错。": "Now: clone mode, but the reference audio is missing (voice.json ref_audio) — speaking will fail.",
+  "现在：GGUF 模型——这台 Windows 跑不了，请切回 torch 版。": "Now: GGUF model — not runnable on this Windows box; switch back to a torch build.",
+  "现在：预设音色——在下面「说话的声音」里挑基底音色。": "Now: preset voice — pick a base voice under “The voice” below.",
+  "（改过了，重启后生效）": "(changed — applies after restart)",
+  "当前是克隆模式：声音来自参考音频——「基底音色」选谁都不影响；「刻度」与「音色描述」会作为语气指令生效（能调快慢/情绪/语气，换不了音色本身）。": "Clone mode: the voice comes from the reference audio — the base-voice picker has no effect; dials & style note apply as a tone instruction (pace/emotion/manner — not timbre).",
+  /* 语音页·参考音频/参考文本（克隆用） */
+  "参考音频": "Reference audio",
+  "克隆模式的声音来源——把录音放进 refs/ 再点一下填入（wav 最稳）：": "The voice source in clone mode — drop a recording into refs/ and click to fill (wav works best):",
+  "参考文本": "Reference text",
+  "那段录音逐字说了什么——要和录音一字不差（差得多，克隆会走样）。": "Exactly what the recording says — must match word for word (mismatches distort the clone).",
+  "说话的声音": "The speaking voice",
+  "这里是同一个模型下 {p} 的嗓子：改完下一句就生效，不用重启。": "{p}'s voice under the same model: applies from the next sentence, no restart.",
+  "基底音色是换一个人（挑好一个就不动它），下面那些刻度是同一个人换种说法——微调在刻度上做。": "The base timbre swaps the person (pick one and leave it); the sliders below are the same person speaking differently — fine-tune there.",
+  "基底音色": "Base timbre",
+  "显示全部": "Show all",
+  "微调刻度要从服务那边拿——先起来（顶栏「语音」）才能调。": "Slider definitions come from the service — start it (top-bar Voice) to tune.",
+  "音色描述": "Voice description",
+  "跟随 voice.json": "follow voice.json",
+  "刻度调回默认": "Reset sliders",
+  "试听": "Preview",
+  "没调过的刻度不进指令；音色描述想写什么写什么（\"带一点鼻音\"\"像刚睡醒\"）。": "Untouched sliders stay out of the instruction; the voice description is free text (\"a little nasal\", \"just woke up\").",
+  "方言和外语那几个默认不出现，勾「显示全部」可以选回来。": "Dialect and foreign-language presets are hidden by default; tick \"Show all\" to bring them back.",
+  "（服务没起也能改，起来就生效。）": "(Editable even while the service is down; applies once it's up.)",
+  "跟随语音服务（{svc}）": "Follow the voice service ({svc})",
+  "默认": "default",
+  "刻度已调回默认（还没保存）": "Sliders reset to defaults (not saved yet)",
+  "已保存——重启语音服务后生效。": "Saved — applies after the voice service restarts.",
+  "没有变化。": "No changes.",
+  "正在保存…": "Saving…",
+  "正在重启语音服务（先关、再起）…": "Restarting the voice service (stop, then start)…",
+  "旧的已关掉，正在起新的…": "Old one stopped; starting the new one…",
+  "起不来": "won't start",
+  "重启好了——新配置已生效（权重第一次播报时才读）。": "Restarted — the new config is live (weights load on the first utterance).",
+  "重启失败：": "Restart failed: ",
+  "试听中…": "Previewing…",
+  "在放了（这一段就是 {p} 接下来每句的嗓子）": "Playing (this is the voice {p} will speak with from now on)",
+  "放不出来：": "Can't play: ",
+  "没接上（{why}）": "Not connected ({why})",
+  "服务没起": "service not running",
+  "（空闲 {a} 分钟，{b} 分钟后自动放掉显存）": " (idle {a} min; VRAM frees in {b} min)",
+  "已接上 · 模型 {m} · ": "Connected · model {m} · ",
+  "已加载": "loaded",
+  "还没加载（第一次播报要等十几秒）": "not loaded yet (first utterance takes a dozen seconds)",
+  " · 服务当前音色 {v}": " · service timbre {v}",
+  "语音：开": "Voice: on",
+  "语音：关": "Voice: off",
+  "语音：关闭中…": "Voice: stopping…",
+  "语音：启动中…": "Voice: starting…",
+  "语音服务在跑——点一下 = 关掉（放显存）": "Voice service is running — click to stop (frees VRAM)",
+  "语音服务没起——点一下 = 起起来（几秒）": "Voice service is off — click to start (a few seconds)",
+  "没关掉：": "Not stopped: ",
+  "没起来：": "Not started: ",
+  "操作失败：": "Action failed: ",
+  "自动朗读：开（点一下关）": "Auto-read: on (click to turn off)",
+  "自动朗读：关（点一下开）": "Auto-read: off (click to turn on)",
+  "关闭自动朗读": "Turn auto-read off",
+  "打开自动朗读": "Turn auto-read on",
+  "语音没播出来：": "Voice failed to play: ",
+  "没接上语音服务": "voice service not running",
+  "音频播不了：": "Can't play audio: ",
+
+  /* ---- 拖入文件 ---- */
+  "一次只收一个文件——先用第一个（{name}）。": "One file at a time — using the first ({name}).",
+  "{p} 看不了图（没有多模态）。要给 {p} 看，就贴成文字。": "{p} can't see images (no multimodal). Paste it as text instead.",
+  "{name} 现在读不了——用 Word「另存为」存成 txt 或 md 再拖进来就行。": "{name} can't be read yet — save it as txt or md (Word: Save As) and drop it again.",
+  "{name} 不像文本文件，没读。": "{name} doesn't look like a text file; skipped.",
+  "{name} 没读成：{why}": "Couldn't read {name}: {why}",
+  "{name} 读出来是乱码，它大概不是 UTF-8——另存成 UTF-8 再拖一次。": "{name} came out garbled — it's probably not UTF-8; save it as UTF-8 and drop it again.",
+  "，太长就取了前 {n} 字（可以在这里删掉不要的部分）": " — long input, kept the first {n} chars (delete what you don't need here)",
+  "已收下 {name}（{n} 字）{note}——发送时会一起发过去；想先改就点「展开改写」。": "Got {name} ({n} chars){note} — it goes out with your next message; click \"expand & edit\" to tweak it first.",
+  "{n} 字": "{n} chars",
+  "（偏长，{p} 可能接不住——可以只留下要问的那部分）": "(Long — {p} may not hold all of it; keep just the part you're asking about)",
+  "放进输入框，就能看、能改": "Drop it into the input box to view and edit",
+  "展开改写": "Expand & edit",
+  "移除": "Remove",
+  "和谁聊（切换后她说下一句就用新人格）": "Who to talk with (applies from her next sentence)",
+  "已切到「{name}」——下一句起，说话的就是 {p}。": "Switched to {name} — {p} speaks from the next sentence.",
+  "切换失败：": "Switch failed: ",
+  "文档 · {name} · {n} 字（点开看）": "Document · {name} · {n} chars (click to open)",
+  // 人格注释（下拉里跟在名字后）：中文原文即显示文本，这里只补英文
+  "共情、温暖": "empathy, warmth",
+  "轻松、灵动": "light, playful",
+  "诚实、严谨": "honest, rigorous",
+}};
+/* 当前人格名——文案里的 {p} 从这里取（思考条 / 动作回执 / 面板说明……）。
+   界面显示的"她"必须跟着「和谁聊」走：切了人格，所有文案里的名字一起换，
+   不能有的地方钉死在 air 上（踩过的坑：思考条写着 air，人用的是 mia）。
+   `loadPersona`（启动）与下拉 change（切换）两处更新。 */
+let CUR_PERSONA = "air";
+function curName(){ return PERSONA_LABEL[CUR_PERSONA] || CUR_PERSONA || "air"; }
+function t(k, a){
+  let s = (I18N[LANG] && I18N[LANG][k]) || k;
+  // {p}（人格名）默认注入，不用每个调用点传；其余占位符沿用旧规矩：没传 a 就原样
+  if(!a && s.indexOf("{p}") < 0) return s;
+  s = s.replace(/\{(\w+)\}/g, (_, name) => {
+    if(a && a[name] != null) return a[name];
+    if(name === "p") return curName();
+    return a ? "" : `{${name}}`;   // 没传参数：未知占位符保持原样（与旧行为一致）
+  });
+  return s;
+}
+/* 静态元素的文案：带 `data-t`（正文）/ `data-tt`（title）/ `data-tp`（placeholder）
+   的，启动时按当前语言刷一遍；动态渲染的文案在各自的渲染函数里 t()。 */
+function paintStatic(){
+  document.querySelectorAll("[data-t]").forEach(el => { el.textContent = t(el.dataset.t); });
+  document.querySelectorAll("[data-tt]").forEach(el => { el.title = t(el.dataset.tt); });
+  document.querySelectorAll("[data-tp]").forEach(el => {
+    // 编辑态下输入框的提示是另一句（"改这句…"）——切语言不该把它刷回发送提示
+    if(el === $("input") && editingTurn) return;
+    el.placeholder = t(el.dataset.tp);
+  });
+}
+// 「对话」永远第一项：它是这里的主事，其余都只是"查看"。
+// （原来在底部横排，既挤不下、又和对话抢焦点；竖到左边之后才各归其位。）
+// （原「连线」页已撤，2026-09-24：`edges` 表退役——四类边全改派生，
+//   没有"边"这个对象可看了。查看关系改在各页自己的入口里：
+//   画像的依据链 / 场景的"被谁引用" / 摘要的素材。）
+let TABS = ["对话","档案","画像","场景","摘要","备忘录","实体","主题","打捞","留痕","语音","设置"];
+// 「档案」和「画像」同组但性质相反：一个是他说的事实，一个是 air 的推测。
+let NAV_GROUP = {"档案":"关于用户","画像":"关于用户","打捞":"系统","留痕":"系统","语音":"系统","设置":"系统"};
+let activeTab = "对话";
+
+// 每页顶部一句话：**这页是干什么的**。
+//
+// 为什么集中到这里：原先每页自己写一段，而且总把"为什么这么设计"一起写进去，
+// 十二页累计下来，真正的内容被挤到屏幕外——**该读的东西反而最难读到**。
+// 设计论证的正确位置是代码注释——那边才是它该待的地方；
+// 界面上只需要一句说得清"这是干什么"的话。
+const PAGE_NOTE = {
+  "档案":   "用户自己填的事实。和「画像」分开存——那边是 {p} 的推测，这边不需要印证。",
+  "画像":   "{p} 的推测。攒够 3 次同情境印证才成立，觉得不对可以直接否决。",
+  "场景":   "每段对话落成的一张卡——长期记忆的主体。",
+  "摘要":   "同一主题攒够几条场景后，聚合出来的一层。",
+  "备忘录": "还没了结的事。到期就进注入，一轮最多一件——提不提、怎么提是话里的分寸。",
+  "实体":   "用户反复提到的人和地方。",
+  "主题":   "名字写歪了的主题——疑似同一件却被写成两种说法，合不合并由你点头。",
+  "打捞":   "翻原文。删掉的是「理解」，原文还在——要找回什么就到这儿翻。",
+  "留痕":   "{p} 每次开口前的判断都记在这儿，一行一次——「她怎么没想起那件事」到这儿翻。她的手（工具）、备忘录进出、整理与漂移也一并落在这里。",
+  "语音":   "{p} 的声音。可选外挂（独立服务），没起也不影响聊天。",
+  "设置":   "模型服务的连接与凭据、语言，以及人格（新建 / 编辑 / 停用）。",
+};
+
+/* 页头：**一处写、十二页用**。没有登记的页（对话）不长这个头——
+   对话是这个界面的主事，给它加一句说明等于把主角的名字写到海报背面。 */
+function pageHead(tab){
+  const note = PAGE_NOTE[tab];
+  return note ? `<h2>${esc(t(tab))}</h2>`
+                + `<div class="why" style="margin-bottom:14px">${t(note)}</div>` : "";
+}
+
+async function api(path, opts){
+  const r = await fetch(path, opts);
+  const d = await r.json().catch(() => ({error:"bad json"}));
+  if(!r.ok || d.error) throw new Error(d.error || r.status);
+  return d;
+}
+
+/* ---------- 消息操作条（复制 / 编辑）----------
+   参照 DeepSeek Harness：按钮挂在**消息下面**，悬停才现（**最后那一轮常显**——
+   不常显就没人知道有「编辑 / 重新生成」这两个口，见 `.m.is-last .acts`），
+   复制点了变对勾一秒。
+   编辑**只对窗口里的用户消息开放**——那一段还没进长期库，改它等于改 air 将来会记住什么；
+   已进库的那部分是原文，只读（要改理解去「场景」页改摘要，那是另一条链）。
+   它那边把「编辑已发消息」删掉了（没后端支撑），我们这边补上了后端，所以按钮才立得住。 */
+const ICO = {
+  copy:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="11" height="11" rx="2.6"/><path d="M15 6.4A2.6 2.6 0 0 0 12.4 4H6.6A2.6 2.6 0 0 0 4 6.6v5.8A2.6 2.6 0 0 0 6.6 15"/></svg>',
+  check:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4.5 12.5l5 5 10-11"/></svg>',
+  edit:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20h4L18 10a2.9 2.9 0 0 0-4-4L4 16v4z"/><path d="M13.6 6.4l4 4"/></svg>',
+  sound:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M5 9.5h3L12.5 6v12L8 14.5H5z"/><path d="M16 9.2a4.4 4.4 0 0 1 0 5.6"/></svg>',
+  soundOff:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M5 9.5h3L12.5 6v12L8 14.5H5z"/><path d="M16.2 10l3.6 4M19.8 10l-3.6 4"/></svg>',
+  stop:'<svg viewBox="0 0 24 24" fill="currentColor"><rect x="7" y="7" width="10" height="10" rx="2"/></svg>',
+  // 弯箭头 = 重新生成（**和铅笔分开**：铅笔是改这句，弯箭头是原样再来一遍）
+  regen:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-9-9c2.52 0 4.93 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/></svg>'
+};
+
+/* 一条消息的「文本」以哪个为准：用户那条以 `_text` 为准（附件并进去之后
+   屏幕上的卡片只是它的一部分）；air 那条直接读 DOM——air 在流式里一直变。 */
+const bubbleText = (el) => (el._text != null ? el._text
+                            : ((el.querySelector(".bubble") || {}).textContent || ""));
+
+/* 复制：优先异步剪贴板，不成退回 execCommand（同 Harness 的 `writeClipboard`——
+   本地 `http://` 下 `navigator.clipboard` 可能不可用，那条回退不是摆设）。 */
+async function writeClipboard(text){
+  try{
+    if(navigator.clipboard && window.isSecureContext){
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+  }catch(e){ /* 落到回退那条路 */ }
+  try{
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    ta.style.position = "fixed"; ta.style.top = "-1000px"; ta.style.opacity = "0";
+    document.body.appendChild(ta); ta.select();
+    const ok = document.execCommand("copy");
+    ta.remove();
+    return ok;
+  }catch(e){ return false; }
+}
+
+/* 挂一条操作条（先只有复制）。`text` 用回调传——文本会被就地改，别把旧值闭进去。 */
+function msgActions(host, text){
+  const row = document.createElement("div");
+  row.className = "acts";
+  const b = document.createElement("button");
+  b.type = "button"; b.title = t("复制"); b.setAttribute("aria-label", t("复制"));
+  b.innerHTML = ICO.copy;
+  b.onclick = async () => {
+    if(b.dataset.busy) return;                 // 连点不重复写
+    b.dataset.busy = "1";
+    const ok = await writeClipboard(text());
+    delete b.dataset.busy;
+    if(!ok) return;
+    b.innerHTML = ICO.check; b.classList.add("ok"); b.title = t("已复制");
+    setTimeout(() => {                         // 一秒收起：它是回执，不是状态
+      b.innerHTML = ICO.copy; b.classList.remove("ok"); b.title = t("复制");
+    }, 1000);
+  };
+  row.appendChild(b);
+  host.appendChild(row);
+  return row;
+}
+
+/* 改一句 / 重新生成：**回退重发**——撤掉这一轮（他这句 + 到下一句之前她说的），
+   重新走一遍。语义是**回到那一句的地方重说一句**，不是「改一条记录」：
+   被撤掉的两条从没进过长期库，撤掉就等于没说过——**所以不留痕**
+   （没有记忆被改动，就没有"谁改了什么"要回答；旧那套「改一条消息」动的是记录，才需要）。
+
+   两个入口**分开摆**（2026-10-07 改）：铅笔 = 改这句重发；弯箭头 = 原样再来一遍。
+   以前一个按钮兼两义，提示语只能写得又长又绕，而"不改就重发"看着像什么都没发生。
+
+   **窗口里的每一轮都能动**（2026-10-07 放宽，原来只有末尾那一轮）：改第 2 轮，
+   就等于把第 2 轮**和它后面那些**一起撤掉重说——撤得掉的边界是**窗口**：
+   更早的（已经进了长期库的）撤不了，那不是改错字、是改历史，界面上也不给按钮。
+   所以这里维护一个**轮次栈**：窗口里还站着的那些轮次，从头到尾；
+   重发 / 重新生成时从目标那一轮截断（`resendTurn` 里的 `splice`），
+   **停止不改它**——半句也是这一轮的产物，照常入栈（见 `pushTurn`）。 */
+let turnStack = [];             // [{userEl, airEl}]：窗口里还站着的那些轮次（按先后）
+// 「有活在飞」的计数 + 在飞的那几条流（FIFO）。为什么是计数不是布尔：她还在答的
+// 时候他又发了下一句，**在飞的不止一条**（服务端按锁排队，见 `dashboard.chat_stream`）
+// ——布尔会被先收工的那条解除，另一条就成了"按钮不见了、也没人停得掉"。
+// 忙碌态因此**推出来**（`busy()`），不各自记一份。
+// 「重发 / 重新生成」挡在门外：air 这一轮的回复要**生成完才写进窗口**，
+// 边生成边撤会撤到更早那一轮上去，两个流也会撞在一起。
+let busyN = 0;
+let turnBusy = false;
+let turnCtrls = [];   // 在飞的那些流（**FIFO**：第 0 条 = 正在生成的那条，见 `stopTurn`）
+
+/* 给**栈里的每一轮**挂按钮。每次都**先全清再重挂**：重发后气泡是新元素，
+   而按钮的 onclick 绑一次就定了——闭进旧元素的话，第二次点会动一个不在页面上的节点。
+   操作条的显隐交给 CSS：最后一轮常显，更早的悬停才现（`.m.user:has(~ .m.user)` 那条）。 */
+function bindLastTurn(){
+  document.querySelectorAll(".acts button[data-edit],.acts button[data-regen]")
+          .forEach(b => b.remove());
+  document.querySelectorAll("#msgs .m.is-last").forEach(el => el.classList.remove("is-last"));
+  turnStack.forEach(turn => {
+    addTurnBtn(turn.userEl, "edit", ICO.edit,
+               t("编辑这句（改完从这里重发；它后面那些会一起撤掉）"), () => {
+      if(turnBusy){ bubble("sys", "系统", t("等这一轮说完再动它。")); return; }
+      beginEdit(turn.userEl);
+    });
+    if(turn.airEl) addTurnBtn(turn.airEl, "regen", ICO.regen,
+                              t("重新生成（从这一轮原样重来；它后面那些会一起撤掉）"), () => {
+      if(turnBusy){ bubble("sys", "系统", t("等这一轮说完再动它。")); return; }
+      regenerate(turn.userEl);
+    });
+  });
+  // 「最后一轮」打标：它的操作条**常显**（其余悬停才现）——藏起来就没人知道
+  // 有「编辑 / 重新生成」这两个口（CSS 见 `.m.is-last .acts`）。
+  const top = turnStack[turnStack.length - 1];
+  if(!top) return;
+  top.userEl.classList.add("is-last");
+  if(top.airEl) top.airEl.classList.add("is-last");
+}
+
+function addTurnBtn(host, key, icon, title, fn){
+  const row = host.querySelector(".acts") || msgActions(host, () => bubbleText(host));
+  const b = document.createElement("button");
+  b.type = "button"; b.dataset[key] = "1";
+  b.title = title; b.setAttribute("aria-label", title);
+  b.innerHTML = icon;
+  b.onclick = fn;
+  row.appendChild(b);
+  return b;
+}
+
+/* 入栈——**三条路都往这儿走**：收到 `end`（说完了）、按了停止（半句也是这一轮的
+   产物）、刷新回填（窗口里还站着那几轮）。`airEl` 给 `null` = 这一轮没有可指向的
+   气泡（她一个字没说，或那个空壳已经撤了）。
+   出栈：重发 / 重新生成时从目标那一轮截断（`resendTurn` 里的 `splice`）。 */
+function pushTurn(userEl, airEl){ turnStack.push({userEl, airEl}); bindLastTurn(); }
+
+/* 「有活在飞」进一格 / 出一格：撤销请求占一格，每条在飞的流也占一格——忙碌态
+   由计数推出来，**不各自记一份**（两份就会漂：先收工的那条把忙碌解了，另一条
+   还在生成，停止键却不见了）。按钮的显隐跟着它走：生成中发送键让位给停止键
+   （**换位，不是加一个**：两个都能点的时候，点错一次就是两条流撞在一起）。 */
+function busy(on){
+  busyN = Math.max(0, busyN + (on ? 1 : -1));
+  turnBusy = busyN > 0;
+  $("sendBtn").disabled = turnBusy;
+  $("stopBtn").style.display = turnBusy ? "" : "none";
+}
+
+/* 「停止」：断流。后端收到断开（`GeneratorExit`）会把**她已经说出口的那半句**
+   落进窗口（`chat._commit_partial_turn`）——所以这一轮不是作废，是"说到一半"。
+   ⚠️ 它只活在窗口里：提取那一步会把它滤掉，长期库（原文 / 场景卡）不留
+   （`shortterm.compress_and_extract`）。
+   界面这一侧只加标记、不动正文，收尾在 `streamTurn` 的 AbortError 分支里。 */
+function stopTurn(){
+  // 停的是**正在生成的那条**：FIFO 第 0 条（服务端按锁排队，最先发出去的那条才
+  // 是正在答的那条）。**不挑"最新那条"**——那几条还没轮到，断它等于替下一句提前
+  // 按了停止，而用户要停的是眼前这条。
+  // ⚠️ 别连点：第 0 条断掉、它的请求一收工，下一条就顶上第 0 条；那时若服务端还
+  // 没轮到它（还在等锁），撤掉请求**拦不住**她替它写下去（可能落半句进窗口），
+  // 界面上却已经是「已停止」的样子。真想清掉它，等它开始答了再按。
+  const c = turnCtrls[0];
+  if(c) c.abort();
+}
+
+/* 把一条用户消息的正文换成新文本。**整块重画**：附件卡片（如果有）不再有意义——
+   air 将来记住的就是这段纯文本。 */
+function renderUserText(userEl, text){
+  userEl._text = text;
+  const b = userEl.querySelector(".bubble");
+  if(b) b.innerHTML = `<div class="txt">${md(text)}</div>`;
+}
+
+/* 重发（**改词重发与重新生成共用这一份**——两套的话迟早长得不一样）：
+   ① `/api/turn-undo` 撤掉**这一轮和它后面那些**（窗口里的）→ ② 界面上从这一轮
+   往后整片收掉（动作回执留着）→ ③ 走正常那一轮（流式）重新生成。
+   撤不掉（已经进长期库了）就如实说：那时候能改的只有「场景」页里的理解。
+
+   失败分两种，收口也不一样（别混成一句"没成"）：
+     · **后端明说撤不了**（`d.ok` 假）——状态是清楚的（照后端说的，那一轮不在
+       窗口里），如实报一句，屏幕一个字不动；
+     · **分不清**（撤销请求没走通 / 流断在半路）——**不猜**，交给 `resyncChat`
+       去问服务端要现状，把屏幕重新对上。 */
+async function resendTurn(userEl, text){
+  const idx = turnStack.findIndex(x => x.userEl === userEl);
+  // 不在栈里 = 它已经不在窗口里了（被撤掉、或被提取走了）：撤不了，也没法就地改。
+  // 界面上走不到这儿（铅笔只挂在栈里那些轮次上）——真到了就按"分不清"收：
+  // 去问服务端，把话退回输入框，而不是摆一个撤不动的编辑态。
+  if(idx < 0){ await resyncChat(text, t("这一轮已经不在窗口里了")); return false; }
+  const turns = turnStack.length - idx;         // 这一轮 + 它后面的一起撤
+  const expect = bubbleText(userEl);            // 窗口里现在存着的那句，交给后端核对
+  // ⚠️ **进函数就上锁**，不能等撤销回来再上：`/api/turn-undo` 在飞的那几十毫秒里
+  // `turnBusy` 还是 false，连点两下会连撤两轮（第二下撤的是更早那一轮，
+  // 而那一轮本来不该动——末尾随第一下变了）。
+  busy(true);
+  let done;
+  try{
+    const d = await api("/api/turn-undo", {method:"POST",
+      headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({turns, expect})});
+    if(!d.ok){                                  // 撤不了 / 窗口变了（后端一个字都没撤）
+      bubble("sys", "系统", d.detail || t("撤不了这一轮"));
+      return false;
+    }
+    // 窗口里已经没了 → 界面上也收掉：**这一轮（到下一轮开始为止）**整片收，
+    // 只留它自己的动作回执（`.act`）——那些动作真发生了，撤的是对话、不是事实。
+    // ⚠️ 判据不能写成"紧挨着他的话那几条"：回执是插在**思维链之后、正文之前**的
+    // （`bubbleAct` 的 `before`），照"从头一路删"写会把它们一起删掉（和注释说的
+    // 就相反了）。所以先划出这一段的边界，段内留 `.act`，**段外整片收**——
+    // 后面几轮的一切（连它们的回执）都不留，否则页面上会剩一堆没有对话可依的回执。
+    turnStack.splice(idx);
+    let stop = userEl.nextElementSibling;          // 这一轮到哪儿为止：下一条他说的
+    while(stop && !stop.classList.contains("user")) stop = stop.nextElementSibling;
+    let el = userEl.nextElementSibling;
+    while(el && el !== stop){                      // 段内：回执留着，其余收掉
+      const next = el.nextElementSibling;
+      if(!el.classList.contains("act")) el.remove();
+      el = next;
+    }
+    while(stop){                                   // 段外：整片收
+      const next = stop.nextElementSibling;
+      stop.remove();
+      stop = next;
+    }
+    bindLastTurn();
+    const think = thinkBox();
+    const air = bubble("air", curName(), "");
+    done = await streamTurn(text, air, think, userEl);
+    // 停止由 `streamTurn` 自己收尾（半截留着、标「已停止」、入栈），这里不用管；
+    // **出错 / 流断在半路**那条它管不了：这一轮在窗口里长什么样分不清——去问服务端。
+    // **留在忙里**（同 `send`）：对齐要重画整段，这期间放进来的新消息会被冲掉。
+    if(done === "error") await resyncChat(text, t("这一轮断在半路"));
+  }catch(e){
+    // 撤销那一步就没走通（多半是网络）：**它到底撤没撤，这一侧不知道**——
+    // 按"分不清"收（见函数头那段）：去问服务端，话会被退回输入框。
+    bubble("sys", "系统", t("没重说成：") + e.message);
+    await resyncChat(text, t("重发没走完"));
+    return "error";
+  }finally{
+    busy(false);
+  }
+  return done;
+}
+
+/* 编辑与重新生成**不能同时开着**：撤销会把那一轮整个重跑，而编辑态还指着
+   原那一轮——之后按发送会去撤一个已经重跑过的轮次（撤错一轮）。
+   所以重新生成前一律**整块退出编辑态**（连输入框一起清），不是只摘个样式。 */
+function cancelEditForRegen(){
+  if(editingTurn) endEdit(true);
+}
+
+/* 重新生成（弯箭头）：**不改文本**，撤掉这一轮（和它后面那些）原样再来一遍。
+   弯箭头挂在哪一轮的气泡上，重做的就是哪一轮——不只最后一条。 */
+async function regenerate(userEl){
+  if(!turnStack.some(x => x.userEl === userEl)) return;
+  const before = bubbleText(userEl);
+  if(!before.trim()) return;
+  cancelEditForRegen();
+  try{
+    await resendTurn(userEl, before);
+  }catch(e){
+    bubble("sys", "系统", t("没重说成：") + e.message);
+  }
+}
+
+/* 编辑：**文本回到底部输入框**改，改完按发送键重发（2026-10-07 抄 ai-chatbot 的
+   `message-editor` + `multimodal-input` 那一路）。
+
+   为什么改成这样：原来自己造了一个**内联编辑框**，于是页面里有两套文本输入，
+   键位还反着（编辑框 Enter 换行、主输入框 Enter 发送）——两套键位混着用必按错。
+   主流做法是**复用同一个输入框**：铅笔 = "把这句话放回输入框"，发送键就是
+   "保存并重发"。少一套 UI，键位自然只有一套。
+
+   屏幕上的原消息**留着、只压暗**（不是藏起来）：改的时候还看得见原来那句。 */
+let editingTurn = null;         // {userEl, before}：正在改哪一条、它原来是什么
+
+function beginEdit(userEl, text){
+  const before = userEl._text != null
+    ? userEl._text : ((userEl.querySelector(".bubble") || {}).textContent || "");
+  if(!before.trim()) return;
+  if(editingTurn) endEdit(false);          // 已经在改另一条：先收掉（只保留一处编辑态）
+  editingTurn = {userEl, before};
+  userEl.classList.add("editing");
+  const box = $("input");
+  // `text`：要放回输入框的那份（提交失败时用它把**改好的那句**还回来）；
+  // 不给就用原话（点铅笔的正常进来那一路）。
+  box.value = text != null ? text : before;
+  box.placeholder = t("改这句…（Enter 保存并重发，Esc 取消）");
+  fitInput();
+  box.focus();
+  box.setSelectionRange(box.value.length, box.value.length);
+  // 改第 N 轮 = 它后面那些也一起撤掉（2026-10-07 放宽之后才有的事）——
+  // **这条得印在脸上**，不能只藏在悬停提示里：他点「保存并重发」时，
+  // 后面几轮会当场消失，事先不说清就是坑。
+  const idx = turnStack.findIndex(x => x.userEl === userEl);
+  const after = idx < 0 ? 0 : turnStack.length - idx - 1;
+  $("editBar").style.display = "block";
+  $("editBar").innerHTML = `<div class="ef"><span class="efw">`
+    + esc(after > 0
+        ? t("正在编辑这一句——改完按「发送」重发，它后面那 {n} 轮会一起撤掉", {n: after})
+        : t("正在编辑这一句——改完按「发送」重发"))
+    + `</span><button type="button" id="editCancel">${t("取消")}</button></div>`;
+  $("editCancel").onclick = () => endEdit(true);
+}
+
+/* 退出编辑态。`clearBox`：顺手把输入框清空（取消时清，提交时已经先清了）。 */
+function endEdit(clearBox){
+  const cur = editingTurn;
+  editingTurn = null;
+  if(cur) cur.userEl.classList.remove("editing");
+  $("editBar").style.display = "none";
+  $("editBar").innerHTML = "";
+  const box = $("input");
+  box.placeholder = t("说点什么…（Enter 发送，Shift+Enter 换行）");
+  if(clearBox){ box.value = ""; fitInput(); box.focus(); }
+}
+
+/* 提交编辑：**撤掉这一轮 + 用改后的文本重发**（发送键与 Enter 都走这里）。 */
+async function submitEdit(){
+  const cur = editingTurn;
+  const next = $("input").value.trim();
+  if(!next) return;                       // 空的没什么可说——等同取消（按键什么都不做）
+  if(turnBusy){ bubble("sys", "系统", t("等这一轮说完再动它。")); return; }
+  endEdit(false);
+  $("input").value = ""; fitInput();      // 这句已经交出去了
+  let done;
+  try{
+    done = await resendTurn(cur.userEl, next);
+  }catch(e){
+    // `resendTurn` 自己兜住了它那几条失败路（撤不成 / 断在半路）——能到这儿的是
+    // 意外（代码错），如实报一句，别吞掉。
+    bubble("sys", "系统", t("没重说成：") + e.message);
+    done = "error";
+  }
+  if(done === false){
+    // **撤销没成**（后端的原话已经报过了）：把改好的话还他。
+    // ⚠️ 这一轮还在栈里（改一下还能再试）才摆回编辑态；**不在栈里就不摆**——
+    // 那会让下一次发送去撤一个栈里没有的轮次，按下去什么都不发生，看着就是卡住。
+    //（"分不清"那两条路（断在半路 / 撤不了）的收口在 `resendTurn` 里，已问过服务端，
+    //  话也已经放回输入框；这里只是兜一层，免得任何一条路上把那句弄丢。）
+    if(turnStack.some(x => x.userEl === cur.userEl)) beginEdit(cur.userEl, next);
+    else { const box = $("input"); box.value = next; fitInput(); box.focus(); }
+    return;
+  }
+  // ⚠️ **撤销没成就不许改写气泡**（上面已经 return 了）：屏幕上的话改了、
+  // 记忆里还是原文，是"看着改了、其实没改"那类最难查的错位。
+  // 成功与停止都要改：他要的就是改后的那句，服务端落的也是它。
+  //（"error" 那条由 `resyncChat` 重画过整段，这里不能再动它。）
+  if(done === "ok" || done === "abort"){
+    if(next !== cur.before) renderUserText(cur.userEl, next);
+  }
+}
+
+/* 标一下「这句说到一半」：**只加标记，一个字都不动正文**——那是她的原话。 */
+function markStopped(airEl){
+  const who = airEl && airEl.querySelector(".who");
+  if(!who || who.querySelector(".stopmark")) return;
+  const s = document.createElement("span");
+  s.className = "stopmark";
+  s.textContent = t("（已停止）");
+  who.appendChild(s);
+}
+
+/* ---------- 语音播报（走本地语音服务，见 tts/）----------
+   为什么不用浏览器自带的 `speechSynthesis`：那档是"机器念字"，
+   而这里要的是**air 的声音**——固定音色、语气由他调的音色刻度定。
+   服务在 `tts/`（独立 venv + 模型，见 tts/README.md）；它没起的时候
+   这里只报一句"没接上"，其余功能一点不受影响。
+
+   **念之前先清洗文本**：air 的话里有 markdown 和代码，直接念是灾难
+   （代码块会被逐字念出来）。规则见 `speakText()`。
+
+   念的路有两条，**默认走流式**（见 `speakStreaming`）：来一帧 PCM 就排一帧，
+   air 开口只等第一帧（约 0.6s），不等整段生成完（约 4.5s）。这条路用不了
+   （老服务 / 浏览器不给读流）就退回整段 + `<audio>`——两条路的声音是同一份
+   （tts/server.py 里 `to_wav` 和流式共用一个 `pcm16` 转换）。 */
+let speakAudio = null;      // 退回"整段"时那个 <audio>
+let speakingEl = null;      // 正在念的那条消息（再点一下＝停）
+let speakCtx = null;        // 流式播放用的 AudioContext（一个页面一个）
+let speakEnd = 0;           // 下一帧该排到哪个时刻（接缝靠它连续，不靠 setTimeout）
+let speakCtrl = null;       // 正在读的那条流（停的时候 abort 它）
+let speakSrcs = [];         // 已排进队列的音频块（停的时候挨个停）
+
+function speakText(raw){
+  // ⚠️ 变量不能叫 `t`——会遮住全局翻译函数（重命名过一次，别改回去）
+  let s = (raw || "");
+  s = s.replace(/```[\s\S]*?```/g, t("（一段代码）"));   // 代码块不逐字念
+  s = s.replace(/`([^`]+)`/g, "$1");                 // 行内代码只念内容
+  s = s.replace(/!\[[^\]]*\]\([^)]*\)/g, "");        // 图片没有可念的
+  s = s.replace(/\[([^\]]+)\]\([^)]*\)/g, "$1");     // 链接只念文字
+  s = s.replace(/\*\*([^*]+)\*\*/g, "$1");           // 粗体
+  s = s.replace(/(^|[\s(（])[*_]([^*_\n]+)[*_]/g, "$1$2");   // 斜体
+  s = s.replace(/^#{1,6}\s*/gm, "");                 // 标题号
+  s = s.replace(/^\s*[-*+]\s+/gm, "");               // 列表符号
+  s = s.replace(/^\s*>\s?/gm, "");                   // 引用号
+  s = s.replace(/\n{2,}/g, "\n");                    // 空行压掉（不然停顿很长）
+  return s.trim();
+}
+
+function setSpeaking(el, on, note){
+  const b = el && el.querySelector('.acts button[data-speak]');
+  if(!b) return;
+  b.innerHTML = on ? ICO.stop : ICO.sound;
+  b.classList.toggle("on", !!on);
+  b.title = on ? (note || t("停止朗读")) : t("朗读");
+  b.setAttribute("aria-label", on ? t("停止朗读") : t("朗读"));
+}
+
+function stopSpeak(){
+  // 两条路都要停干净：流那条要 abort（不然读着的连接一直挂着）+ 把排好的块挨个停
+  if(speakCtrl){ try{ speakCtrl.abort(); }catch(e){ /* 已经断了 */ } speakCtrl = null; }
+  speakSrcs.forEach(s => { try{ s.stop(); }catch(e){ /* 还没开始或已经结束 */ } });
+  speakSrcs = []; speakEnd = 0;
+  if(speakAudio){ try{ speakAudio.pause(); }catch(e){ /* 已经停了 */ } speakAudio = null; }
+  if(speakingEl) setSpeaking(speakingEl, false);
+  speakingEl = null;
+}
+
+/* ---- 流式播放：**自己排，不用 <audio>** ----
+   `<audio>` 要等整段文件；而 WAV 又喂不进 MediaSource（那个只吃 mp4/webm/mp3）。
+   所以这里把 PCM 排进 AudioContext：一帧进来就建一个 AudioBuffer，排在"上一帧
+   结束的时刻"（`speakEnd`）上——排的是**时刻**而不是"立刻播"，接缝因此天然连续，
+   不是靠 setTimeout 对齐（那个会抖）。 */
+function speakCtxGet(){
+  if(!speakCtx) speakCtx = new (window.AudioContext || window.webkitAudioContext)();
+  if(speakCtx.state === "suspended") speakCtx.resume();   // 自动播放策略：点过页面就允许
+  return speakCtx;
+}
+
+function speakQueue(pcm, n, sr){
+  const ctx = speakCtxGet();
+  const dv = new DataView(pcm.buffer, pcm.byteOffset, pcm.byteLength);
+  const f32 = new Float32Array(n);                        // Int16 → [-1,1]
+  for(let i = 0; i < n; i++) f32[i] = dv.getInt16(i * 2, true) / 32768;
+  const buf = ctx.createBuffer(1, n, sr);
+  buf.copyToChannel(f32, 0);
+  const src = ctx.createBufferSource();
+  src.buffer = buf; src.connect(ctx.destination);
+  // 起手留 0.15s 余量（第一帧在路上的时间 + 调度抖动）；之后贴着上一帧末尾排
+  const at = Math.max(ctx.currentTime + 0.15, speakEnd || 0);
+  src.start(at);
+  speakEnd = at + n / sr;
+  speakSrcs.push(src);
+  src.onended = () => {
+    speakSrcs = speakSrcs.filter(x => x !== src);
+    if(!speakSrcs.length && !speakCtrl) stopSpeak();      // 最后一块也放完了：按钮复原
+  };
+}
+
+function speakU8cat(a, b){
+  const c = new Uint8Array(a.length + b.length);
+  c.set(a); c.set(b, a.length);
+  return c;
+}
+
+/* 流式播报。**第一帧排上就算成了**（所以返回值是"这条路的结论"，不是音频本身）：
+     {ok:true}       已经在流着播了
+     {fallback:true} 这条路用不了（老服务 / 不是流 / 断网）——调用方退回整段
+     {error:"..."}   服务在开始前就报了错——调用方弹出来，别再退 */
+async function speakStreaming(el, text, opts){
+  const o = opts || {};
+  // **只在试听时**才带 speaker / dims / instruct_extra：平时这些字段由后端从
+  // `user_prefs` 取（页面不重复管一份设置，两处各存一份必然漂移）。
+  const payload = {text, stream: true};
+  if(o.speaker !== undefined) payload.speaker = o.speaker;
+  if(o.dims !== undefined) payload.dims = o.dims;
+  if(o.instruct_extra !== undefined) payload.instruct_extra = o.instruct_extra;
+  const ctrl = new AbortController();
+  speakCtrl = ctrl;
+  let res;
+  try{
+    res = await fetch("/api/speak", {method:"POST", signal: ctrl.signal,
+      headers:{"Content-Type":"application/json"},
+      body: JSON.stringify(payload)});
+  }catch(e){
+    if(speakCtrl === ctrl) speakCtrl = null;
+    return {fallback:true};
+  }
+  if(!res.ok || !res.body){
+    // 服务在开始前就报错（没接上 / 显存不够）：它仍然是一份 JSON，原样带出去
+    let d = null; try{ d = await res.json(); }catch(e){ /* 不是 JSON 就退 */ }
+    if(speakCtrl === ctrl) speakCtrl = null;
+    return (d && d.detail) ? {error: d.detail} : {fallback:true};
+  }
+  const reader = res.body.getReader();
+  let buf = new Uint8Array(0), sr = 0, head = false, queued = 0;
+  while(true){
+    let chunk;
+    try{ chunk = await reader.read(); }
+    catch(e){ break; }                     // abort（他点了停）也走到这
+    if(chunk.done) break;
+    if(speakingEl !== el) break;           // 念别的去了：这份丢掉
+    buf = speakU8cat(buf, chunk.value);
+    if(!head){
+      if(buf.length < 12) continue;
+      if(String.fromCharCode(buf[0], buf[1], buf[2], buf[3]) !== "ARAU"){
+        try{ reader.cancel(); }catch(e){ /* 已经断了 */ }
+        if(speakCtrl === ctrl) speakCtrl = null;
+        return {fallback:true};            // 老版本服务回的是整段 wav
+      }
+      sr = new DataView(buf.buffer, buf.byteOffset).getUint32(4, true);
+      buf = buf.slice(12); head = true;
+    }
+    while(true){                           // 帧：[样本数 i32][Int16 PCM]
+      if(buf.length < 4) break;
+      const n = new DataView(buf.buffer, buf.byteOffset).getInt32(0, true);
+      if(buf.length < 4 + n * 2) break;    // 半帧：等下一块（网络不按帧切）
+      const pcm = buf.slice(4, 4 + n * 2);
+      buf = buf.slice(4 + n * 2);
+      if(n > 0){
+        speakQueue(pcm, n, sr);
+        if(++queued === 1) setSpeaking(el, true, t("正在念…（再点一下停）"));
+      }
+    }
+  }
+  if(speakCtrl === ctrl) speakCtrl = null;
+  return {ok: true};
+}
+
+/* 念一条消息。**再点一下 = 停**（同一条的按钮在念的时候就是停止键；
+   念别的会自动停掉上一条，不会叠着念）。 */
+async function speak(el, raw){
+  const text = speakText(raw);
+  if(!text) return;
+  if(speakingEl === el){ stopSpeak(); return; }
+  stopSpeak();
+  // 记住"正在念哪条"：**再点一下＝停**、念别的会自动停掉上一条、生成期间换目标要作废，
+  // 全靠它——之前少了这一行，628 行那个判断永远不成立（停止键是坏的），
+  // 636/654 行那两个守卫又永远成立（退回整段那条路会被静默拦掉、一声不出）。
+  speakingEl = el;
+  setSpeaking(el, true, t("正在生成语音…（再点一下取消）"));
+  const got = await speakStreaming(el, text);
+  if(speakingEl !== el) return;          // 生成期间他点了别的：这份音频就不要了
+  if(got.error){                         // 服务如实报的错：原样说，别再退
+    setSpeaking(el, false);
+    bubble("sys", "系统", t("语音没播出来：") + got.error);
+    return;
+  }
+  if(!got.fallback) return;              // 流着播了（第一帧已经排上）
+  let d;                                 // 退回整段：老服务 / 浏览器不给读流
+  try{
+    d = await api("/api/speak", {method:"POST",
+      headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({text})});
+  }catch(e){ d = {ok: false, detail: e.message}; }
+  if(!d.ok){
+    setSpeaking(el, false);
+    bubble("sys", "系统", t("语音没播出来：") + (d.detail || t("没接上语音服务")));
+    return;
+  }
+  if(speakingEl !== el) return;          // 生成期间他点了别的：这份音频就不要了
+  try{
+    const a = new Audio(d.audio);
+    speakAudio = a;
+    a.onended = a.onerror = () => { if(speakingEl === el) stopSpeak(); };
+    await a.play();
+  }catch(e){
+    stopSpeak();
+    bubble("sys", "系统", t("音频播不了：") + e.message);
+  }
+}
+
+/* 给一条消息的操作条加「朗读」 */
+function addSpeakBtn(row, host){
+  const b = document.createElement("button");
+  b.type = "button"; b.dataset.speak = "1";
+  b.innerHTML = ICO.sound; b.title = t("朗读"); b.setAttribute("aria-label", t("朗读"));
+  b.onclick = () => speak(host, bubbleText(host));
+  row.appendChild(b);
+  return b;
+}
+
+/* 自动朗读：**整轮说完才念**（流式边出边念会一顿一顿、还会重复同一句）。
+   开关存 localStorage：它不进提示词、不影响 air 的行为，是"这台浏览器怎么念"——
+   要跨设备再挪进 `user_prefs`（那一步会多一个端点，先不背）。 */
+function speakAuto(){
+  try{ return localStorage.getItem("speak_auto") === "1"; }catch(e){ return false; }
+}
+function renderSpeakToggle(){
+  const b = $("speakToggle");
+  if(!b) return;
+  const on = speakAuto();
+  b.innerHTML = on ? ICO.sound : ICO.soundOff;
+  b.classList.toggle("on", on);
+  b.title = on ? t("自动朗读：开（点一下关）") : t("自动朗读：关（点一下开）");
+  b.setAttribute("aria-label", on ? t("关闭自动朗读") : t("打开自动朗读"));
+}
+function toggleSpeakAuto(){
+  const on = !speakAuto();
+  try{ localStorage.setItem("speak_auto", on ? "1" : "0"); }catch(e){ /* 存不了就只生效这一次 */ }
+  if(!on) stopSpeak();
+  renderSpeakToggle();
+}
+
+/* ---------- 顶栏的语音服务开关（起 / 关）----------
+   一个按钮管"服务在不在"：点一下起（几秒）、再点一下关（放显存）。
+   跟旁边那个喇叭分工不同——喇叭管"念不念"，这里管"服务开不开"。 */
+let voiceUp = null;                    // null = 还没查到（按钮显示"…"）
+function renderVoicePower(on){
+  const b = $("voicePower");
+  if(!b) return;
+  voiceUp = !!on;
+  b.textContent = on ? t("语音：开") : t("语音：关");
+  b.classList.toggle("on", !!on);
+  b.title = on ? t("语音服务在跑——点一下 = 关掉（放显存）")
+               : t("语音服务没起——点一下 = 起起来（几秒）");
+}
+async function refreshVoicePower(){
+  try{
+    const d = await api("/api/voice");
+    renderVoicePower(!!(d.status && d.status.ok));
+  }catch(e){ renderVoicePower(false); }
+}
+async function toggleVoicePower(){
+  const b = $("voicePower");
+  if(!b || b.disabled) return;
+  b.disabled = true;
+  try{
+    if(voiceUp){
+      b.textContent = t("语音：关闭中…");
+      const d = await api("/api/voice/stop", {method:"POST",
+        headers:{"Content-Type":"application/json"}, body:"{}"});
+      if(!d.ok) alert(t("没关掉：") + (d.detail || "?"));
+    }else{
+      b.textContent = t("语音：启动中…");
+      const d = await api("/api/voice/start", {method:"POST",
+        headers:{"Content-Type":"application/json"}, body:"{}"});
+      if(!d.ok) alert(t("没起来：") + (d.detail || "?"));
+    }
+  }catch(e){ alert(t("操作失败：") + e.message); }
+  b.disabled = false;
+  await refreshVoicePower();
+  if(activeTab === "语音") refreshPanel();     // 语音页开着的话，状态行跟着更新
+}
+function autoSpeak(el, raw){
+  if(speakAuto() && raw && raw.trim()) speak(el, raw);
+}
+
+/* ---------- 对话 ---------- */
+function bubble(cls, who, text){
+  const d = document.createElement("div");
+  d.className = "m " + cls;
+  // 「系统 / 你」这类署名也过翻译——那是界面自己的话，不是数据
+  const name = who === "系统" ? t("系统") : (who === "你" ? t("你") : who);
+  d.innerHTML = `<div class="who">${esc(name)}</div><div class="bubble">${md(text)}</div>`;
+  $("msgs").appendChild(d);
+  $("msgs").scrollTop = $("msgs").scrollHeight;
+  // air 的回话可以复制、可以朗读（系统消息不挂：那是告示，不是「说过的话」）
+  if(cls === "air") addSpeakBtn(msgActions(d, () => bubbleText(d)), d);
+  return d;
+}
+
+/* 思维链：**默认收起**——air 在想的时候不该被刷屏，
+   但想知道 air 在想什么的时候能点开。
+   （这是"不用干等"的正解：超时掐断是把刀架在思考上，这个是把过程给你看。） */
+function thinkBox(){
+  const d = document.createElement("div");
+  d.className = "m air think";
+  d.innerHTML = `<div class="who" onclick="this.parentNode.classList.toggle('open')">`
+    + `<span class="tbar">${t("{p} 在想…")} <span class="t">0.0s</span></span></div>`
+    + `<div class="thinkbody"></div>`;
+  $("msgs").appendChild(d);
+  const t0 = Date.now();
+  const secs = () => ((Date.now() - t0) / 1000).toFixed(1) + "s";
+  return {
+    add(s){
+      d.classList.add("has");        // 有的模型没有思维链，那就只剩计时
+      d.querySelector(".thinkbody").textContent += s;
+      d.querySelector(".t").textContent = secs();
+    },
+    finish(){
+      d.classList.remove("open");
+      const bar = d.querySelector(".tbar");
+      if(bar) bar.textContent = d.classList.contains("has")
+        ? t("想了 {s}（点开看 {p} 怎么想的）", {s: secs()}) : t("想了 {s}", {s: secs()});
+    }
+  };
+}
+
+/* 他的消息：**有附件就显示成一份文档**（卡片 + 点开看全文）。
+   发出去的内容仍然是全文（air 要读到），但**对话里看到的该是文档的样子**——
+   发一篇几千字的东西，不该把整屏摊满。 */
+function bubbleUser(said, att){
+  let inner = "";
+  if(att){
+    inner += `<div class="doc" onclick="this.classList.toggle('open')">`
+      + `<span class="docbar">${t("文档 · {name} · {n} 字（点开看）", {name: esc(att.name), n: att.text.length})}</span>`
+      + `<div class="doctext">${esc(att.text)}</div></div>`;
+  }
+  if(said) inner += `<div class="txt">${md(said)}</div>`;
+  const d = document.createElement("div");
+  d.className = "m user";
+  d.innerHTML = `<div class="who">${t("你")}</div><div class="bubble">${inner}</div>`;
+  // 真正发出去的那一份（附件已经并进来了）——复制和编辑都取它，
+  // 不取屏幕上那点：屏幕上是一条消息，库里是完整的一段。
+  d._text = att ? (said ? said + "\n\n" + att.text : att.text) : said;
+  $("msgs").appendChild(d);
+  $("msgs").scrollTop = $("msgs").scrollHeight;
+  msgActions(d, () => bubbleText(d));
+  return d;
+}
+
+/* air 要改 / 要删时弹的确认条。**点一下就算数**——
+   这比"猜他那句话是不是同意"可靠得多，也不用等下一轮。 */
+function showConfirm(c){
+  const bar = $("confirmBar");
+  if(!c){ bar.style.display = "none"; bar.innerHTML = ""; return; }
+  const del = c.tool === "forget_memory";
+  const ids = c.scene_ids || (c.scene_id ? [c.scene_id] : []);
+  const many = ids.length > 1 ? t("{n} 条（{ids}）", {n: ids.length, ids: ids.join("、")}) : "";
+  let what, acts;
+  if(del){
+    // 三选一（2026-09-23，工具箱稿 §3.4）：她只负责列出来，怎么处置由他点。
+    // **危险靠右**——最贵的一档不该在手指最顺的位置。
+    what = many ? t("{p} 想把这几条列出来处理：{ids}", {ids: esc(many)})
+                : t("{p} 想把 {id}「{title}」列出来处理",
+                    {id: esc(c.scene_id), title: esc(c.title)});
+    acts = `<button class="ghost" onclick="answerConfirm('keep')">${t("不删除")}</button>`
+      + `<button class="ghost" onclick="answerConfirm('archive')">${t("归档冷存")}</button>`
+      + `<button class="danger" onclick="answerConfirm('delete')">${t("彻底删除")}</button>`;
+  }else{
+    // 改哪一栏也要看得见：`field_label` 由后端按层给（`pending_view`，2026-09-24 起
+    // 三层都能改标签）——不标的话「改标题 / 改情境」和「改摘要」在这条上长得一模一样。
+    what = t("{p} 想把 {id}「{title}」改成「{text}」",
+             {id: esc(c.scene_id), title: esc(c.title), text: esc(c.text)})
+         + (c.field_label ? t("（改{field}）", {field: esc(c.field_label)}) : "");
+    acts = `<button class="primary" onclick="answerConfirm('accept')">${t("执行")}</button>`
+      + `<button class="ghost" onclick="answerConfirm('keep')">${t("算了")}</button>`;
+  }
+  bar.style.display = "block";
+  bar.innerHTML = `<div class="cf"><span class="cfw">${what}</span>${acts}</div>`;
+}
+
+async function answerConfirm(action){
+  showConfirm(null);          // 先收起来：连点两下不该执行两次
+  try{
+    const d = await api("/api/confirm", {method:"POST",
+      headers:{"Content-Type":"application/json"}, body: JSON.stringify({action})});
+    bubble("sys", "系统", d.detail || t("没动它"));
+    refreshHeader(); refreshPanel(); refreshAll();
+  }catch(e){ alert(t("没做成：") + e.message); }
+}
+
+/* air 动过什么的回执。**说清动作、成没成、结果是什么**——
+   不留文本协议（不解析 air 的话来猜），靠这条回执看得见。
+   **长回执默认折起来**（web_fetch 抓回的正文有几千字，整段铺开会把对话
+   淹掉）：先露开头，点一下看全文（带滚动）——内容没删，只是不占版面。 */
+const ACT_FOLD_CHARS = 200;     // 超过这个字数才折（约两三行就不折了）
+function bubbleAct(name, detail, ok, before){
+  const d = document.createElement("div");
+  d.className = "m act";
+  const long = (detail || "").length > ACT_FOLD_CHARS;
+  d.innerHTML = `<div class="who">${ok ? t("{p} 做了") : t("没做成")}${long ? t(" · 点开看全文") : ""}</div>`
+    + `<div class="bubble${long ? " fold" : ""}">${esc(name)}　${esc(detail)}</div>`;
+  const b = d.querySelector(".bubble");
+  if(long) b.onclick = () => b.classList.toggle("open");
+  // `before`（= 这一轮的正文气泡）：回执排到**正文之前**——工具是"边想边做"
+  // 的过程，过程在前、结果在后（同 think 条一路）；多个动作按发生顺序
+  // 逐一插到正文前，自然保序。不带锚点时照旧追加到末尾。
+  if(before) before.before(d);
+  else $("msgs").appendChild(d);
+  $("msgs").scrollTop = $("msgs").scrollHeight;
+  return d;
+}
+
+async function send(){
+  // 编辑态下，发送键就是「保存并重发」——键盘与按钮走的是同一个入口，
+  // 所以两边的语义不可能错开（抄的是 ai-chatbot：编辑态里那个发送键就是提交编辑）。
+  if(editingTurn) return submitEdit();
+  const box = $("input");
+  const said = box.value.trim();
+  showConfirm(null);   // 他又开口了：那条确认条作废（他要说的话自己会回答它）
+  // 附件在这一刻并进消息——**发出去之后它就是一条普通消息**，没有特例
+  let msg = said;
+  if(attachment) msg = (said ? said + "\n\n" : "") + attachment.text;
+  if(!msg) return;
+  if(activeTab !== "对话") switchTab("对话");   // 在别的视图里发消息 → 自动切回对话
+  box.value = ""; box.style.height = "";   // 展开改写过时展开过，发完收回
+  const userEl = bubbleUser(said, attachment);   // 渲染完再清，不然卡片里没东西
+  clearAttachment();                       // 附件跟着这一条一起走了
+
+  const think = thinkBox();                // **先想后说**：思维链在 air 的话上面
+  const air = bubble("air", curName(), "");
+  busy(true);
+  let done;
+  try{
+    done = await streamTurn(msg, air, think, userEl);   // 停止的收尾在它里面（见 AbortError 分支）
+    // 断在半路 / 出错：这一轮到底算不算数，这一侧分不清——去问服务端，把屏幕重新对上。
+    // **留在忙里**：对齐时要重画整段，这期间再放进来一句新的，重画会把它连气泡一起冲掉。
+    // `said` 是**他打的那份**：附件并进消息那一份不进输入框，这里也一样（空的就不填）。
+    if(done === "error") await resyncChat(said, t("这一轮断在半路"));
+  }finally{
+    busy(false); box.focus();
+  }
+}
+
+/* 一轮生成 + 渲染——**发消息 / 改词重发 / 重新生成共用这一份**
+   （两套的话迟早会长得不一样）。
+
+   返回 `"ok"` / `"abort"` / `"error"`——**三条路的收尾各不相同**：
+     `"ok"`    收到 `end`（后端已把这一轮写完进窗口），气泡照常留着；
+     `"abort"` 他按了停止：半句留着、标「已停止」，后端也把它落进了窗口
+               （`chat._commit_partial_turn`）——这一轮**算数**（能改、能重新生成）；
+     `"error"` 出错**或流断在半路**（没等到 `end`）：这一轮在窗口里长什么样，
+               这一侧分不清——**不猜**，由调用方去问服务端（`resyncChat`）。 */
+async function streamTurn(msg, air, think, userEl){
+  const body = air.querySelector(".bubble");
+  const scroll = () => { $("msgs").scrollTop = $("msgs").scrollHeight; };
+  let text = "";
+  let ended = false;                     // 收到 end = 后端已写完窗口，这一轮算数
+  const ctrl = new AbortController();
+  turnCtrls.push(ctrl);                  // 「停止」断的就是它（FIFO 第 0 条 = 正在生成那条）
+  try{
+    const res = await fetch("/api/chat/stream", {
+      method:"POST", headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({msg}), signal: ctrl.signal
+    });
+    if(!res.ok) throw new Error("HTTP " + res.status);
+    const reader = res.body.getReader(), dec = new TextDecoder("utf-8");
+    let buf = "";
+    for(;;){
+      const {done, value} = await reader.read();
+      if(done) break;
+      buf += dec.decode(value, {stream:true});
+      let i;
+      while((i = buf.indexOf("\n\n")) >= 0){        // SSE：事件之间空一行
+        const block = buf.slice(0, i).trim(); buf = buf.slice(i + 2);
+        if(!block.startsWith("data:")) continue;
+        let ev; try{ ev = JSON.parse(block.slice(5)); }catch(e){ continue; }
+        if(ev.type === "reasoning") think.add(ev.text || "");
+        else if(ev.type === "content"){
+          // 每帧把**已收全文**重渲染（不是在增量上做替换）：`**` 会横跨两个
+          // chunk，半截星号在增量上换不出来（真的坏过：粗体显示成星号）。
+          text += ev.text || ""; body.innerHTML = md(text); scroll();
+        }else if(ev.type === "tool"){
+          // 回执排在**正文之前**（过程在前、结果在后）：气泡是空壳先建的，
+          // 不插的话动作会被追到正文底下——读起来像"说完才做"，与事实相反
+          bubbleAct(ev.name || "", ev.detail || "", !!ev.ok, air);
+        }else if(ev.type === "end"){
+          ended = true;
+          // air 一个字都没回（失败）→ 撤掉那个空的气泡，提示走**系统消息**：
+          // 失败提示不是"air 说过的话"，不该顶在 air 的话的位置上，也不该进记忆
+          //（后端也没把它写进窗口——`hint` 和 `reply` 是两条通道）。
+          if(!ev.reply){
+            air.remove();
+            bubble("sys", "系统", ev.hint || t("（这一轮 {p} 没说话。）"));
+          }
+          renderWake(ev.recall, ev.tools);
+          // 这一轮落定 → 入栈（见 `pushTurn`）。⚠️ 她一个字都没说时那个空壳已经撤了，
+          // 入栈的 air 头必须给 `null`：把一个**已经从页面上摘掉的节点**塞进栈，
+          // `bindLastTurn` 会给它挂按钮、`is-last` 也打在它身上，屏幕上这份反而没有。
+          pushTurn(userEl, ev.reply ? air : null);
+          // 自动朗读：**整轮说完才念**（流式边出边念会一顿一顿、还会重复）
+          if(ev.reply) autoSpeak(air, ev.reply);
+          if(ev.confirm) showConfirm(ev.confirm);   // air 在等一句"是/不"
+          // 被额度掐断（还有正文）时说一声——不然「说了一半」看起来像正常结束
+          if(ev.truncated) bubble("sys", "系统",
+            t("（这段被额度截断了——把设置里的 max_tokens 调大，或者把话拆小一点）"));
+          // （原来这里发一条「提取回执」（提取了一段对话 → S1-000x…）——
+          //   自动提取每次都会冒一条，对天天用的人只是噪声；2026-09-20
+          //   按反馈删了。提取照常发生，结果去「场景」页看，那才是它的正主。）
+          refreshHeader(); refreshPanel();
+        }
+      }
+    }
+  }catch(e){
+    // 他按了停止：**气泡留着，一个字段都不改**——她说到一半的那半句是她的原话。
+    // 后端那边由 `GeneratorExit` 把它落进窗口（`chat._commit_partial_turn`），
+    // 所以这一轮**算数**：能改、能重新生成、这一段的窗口里也还在（栈照常入）。
+    // ⚠️ 但它**只在窗口里活着**：提取那一步会把它滤掉（`shortterm.compress_and_extract`）
+    // ——长期库（原文 / 场景卡）里不会有；等这一段被提取走，刷新后那半句也就不在了。
+    // 屏幕上只加一个「已停止」的标记，让人分得清"说完了"和"被叫停了"。
+    // ⚠️ `end` 已经收到过就**不算停**：那一刻后端写的是完整那一轮（入栈也发生过了），
+    // 再按停止处理会重复入栈、还给它挂个不该有的标记。
+    if(e && e.name === "AbortError"){
+      if(ended) return "ok";
+      if(text.trim()){ markStopped(air); pushTurn(userEl, air); }
+      else { air.remove(); pushTurn(userEl, null); }   // 一个字都没说：不摆一个空气泡
+      return "abort";
+    }
+    body.innerHTML = md(text || (t("这一轮没成：") + e.message));
+    return "error";
+  }finally{
+    turnCtrls = turnCtrls.filter(c => c !== ctrl);   // 收工：从"在飞"里摘掉（忙碌态见 `busy`）
+    think.finish();
+  }
+  // 流读完却**没等到 `end`**：连接是半路断的（服务端炸了、网断了、代理掐了）。
+  // 这一轮在窗口里长什么样（她半句落没落）这一侧不知道——**不猜**，按出错那条收，
+  // 由调用方去问服务端（`resyncChat`）。正常结束一定有 `end`：后端在它里面写完窗口。
+  return ended ? "ok" : "error";
+}
+
+/* 「新对话」：把这一段收进记忆，再把对话区清空——真的重新开始。
+   后端 `/api/new-session` 和收尾（`/api/end`）是同一个动作（提取 + 后台整理），
+   只多一步：**连压缩摘要一起清**，窗口里不留上一段的东西。记录没丢：原文早进长期库，
+   「打捞」里能翻、刷新页面也会按 `/api/history` 回填。
+   ⚠️ 提取要调一次 LLM（几秒），期间按住按钮，防连点（连点两次会多提取一遍）。 */
+async function newSession(){
+  const b = $("newBtn");
+  if(b && b.disabled) return;
+  if(b) b.disabled = true;
+  try{
+    const d = await api("/api/new-session", {method:"POST",
+      headers:{"Content-Type":"application/json"}, body:"{}"});
+    clearChat();
+    bubble("sys", "系统", (d.written
+      ? t("这一段收进记忆了 → {id}「{title}」", {id: d.written.scene_id, title: d.written.title})
+      : t("这一段没什么要记的（窗口空）")) + "　·　" + t("新的一段，从这里开始。"));
+    refreshAll();
+  }catch(e){ bubble("sys","系统",t("新对话失败：")+e.message); }
+  finally{ if(b) b.disabled = false; }
+}
+/* 清空对话区（「新对话」用；`resyncChat` 重画之前也走它）：消息、右列的摘要与
+   「更早的对话」都收走。**只清界面**——记忆在后端，刷新会回填（见 loadHistory）。 */
+function clearChat(){
+  $("msgs").innerHTML = "";
+  $("histAside").innerHTML = "";
+  // 窗口也空了（「新对话」把这一段收进长期库）：没有可撤的一轮，按钮跟着收掉，
+  // 编辑态也没得编了（它指的正是那一段）。
+  turnStack.length = 0;
+  endEdit(true);
+  bindLastTurn();
+  // 备忘录面板不跟着清（它不是"这一段对话"的一部分）——重拉重挂。
+  // 走 refreshMemos 而不是裸 mount：0 条时它会自己摘掉，不露出空面板。
+  refreshMemos();
+}
+async function runDistill(){
+  try{
+    const d = await api("/api/distill", {method:"POST", headers:{"Content-Type":"application/json"}, body:"{}"});
+    bubble("sys", "系统", d.started
+      ? t("开始整理（后台跑：聚合摘要 → 抽象画像 → 收敛 → 老化）")
+      : t("已经在整理中了"));
+    refreshHeader();
+  }catch(e){ bubble("sys","系统",t("整理失败：")+e.message); }
+}
+
+/* ---------- 右侧：唤醒详情 ---------- */
+function cueLabel(k){
+  return t({C1:"C1 语义",C2:"C2 时态",C3:"C3 情感",C4:"C4 自我相关",
+            C5:"C5 自指",C6:"C6 新鲜",C7:"C7 未决"}[k] || k);
+}
+// 整轮卡点的中文名。**只翻名字不解释原因**：原因在 `suppressed_detail` 的
+// 每条 why 里，写两遍就会跟后端漂移（阈值/判据一改，这边就说过时的话）。
+const STAGE_LABEL = {R0:"R0 判「不翻」", weak_gate:"候选都没过相关性门"};
+function renderWake(r, tools){
+  if(!r) return;
+  const cues = r.cues || {};
+  const c3 = cues.C3 || {};
+  // 命中与否**由后端算好**（`cues.hits`）——阈值住在配置里，页面不抄一份：
+  // 抄了就会漂，而且降级时（阈值低得多）前端根本亮不起来。
+  const hits = cues.hits || {};
+  const hit = (k) => hits[k] ? "hit" : "";
+  let h = `<div class="kv">
+    <span class="${hit('C1')}">${cueLabel("C1")} ${fmt(cues.C1)}</span>
+    <span class="${hit('C2')}">${cueLabel("C2")} ${esc(cues.C2)}</span>
+    <span class="${hit('C3')}">${cueLabel("C3")} v=${c3.valence ?? "?"} a=${c3.arousal ?? "?"}</span>
+    <span class="${hit('C4')}">${cueLabel("C4")} ${fmt(cues.C4)}</span>
+    <span class="${hit('C5')}">${cueLabel("C5")} ${cues.C5??0}</span>
+    <span class="${hit('C6')}">${cueLabel("C6")} ${fmt(cues.C6)}</span>
+    <span class="${hit('C7')}">${cueLabel("C7")} ${cues.C7??0}</span>
+    ${hits.entity?`<span class="hit">${t("实体命中")} ${(cues.entities||[]).map(esc).join(" / ")}</span>`:""}
+    ${hits.literal?`<span class="hit">${t("字面命中")} ${Object.keys(cues.literal||{}).map(esc).join(" / ")}</span>`:""}
+  </div>`;
+  // 票数与强信号：**为什么给了原文（R5）**要在这儿答得出来——强维 2 票 / 弱维 1 票，
+  // 数 hits 是数不出来的（后端算好随 `cues.votes` 一起给，2026-10-05）。
+  const vt = cues.votes || {};
+  h += `<div class="why" style="margin-top:4px">${t("票 {n}", {n: vt.votes ?? 0})}`
+     + `${vt.strong?` · ${t("含强维")}`:""}`
+     + `${(r.actions||{}).R5?` · ${t("→ 给原文")}`:` · ${t("不够，不给原文")}`}</div>`;
+  const acts = r.actions || {};
+  h += `<div class="kv" style="margin-top:8px">` +
+    Object.keys(acts).map(k => `<span class="${acts[k]?"hit":""}">${esc(k)} ${acts[k]}</span>`).join("") +
+    `</div>`;
+  $("wakeCues").innerHTML = h;
+
+  let m = "";
+  (r.scenes||[]).forEach(s => { m += `<div class="row"><span class="t">${esc(s.id)}</span>${esc(s.title)}
+      <div class="why">${esc(s.why||"")}</div></div>`; });
+  (r.raws||[]).forEach(x => { m += `<div class="row"><span class="tag">${t("原文")}</span>${esc(x.content)}…</div>`; });
+  // 画像行带编号（2026-09-23，同场景行）：他说「画像第一条 / S3-0001」时，
+  // 界面上就能看出这一轮她拿到的是哪条——那次"她看不见画像"正好卡在这里
+  (r.profiles||[]).forEach(p => { m += `<div class="row"><span class="tag ${p.status==="established"?"ok":"warn"}">${p.status==="established"?t("已立"):t("猜测")}</span><span class="t">${esc(p.id)}</span>${esc(p.statement)}</div>`; });
+  // 常备备忘录（D2b；2026-10-05 晚并栏）：她这一轮**手上拿到**的那几件——**注入 ≠ 提**，
+  // 他问起时答得上来靠的就是它。为什么要给（到点 / 相关 / 最近 / 追问）一并显出来：
+  // 「她为什么答得出 / 答不出那件事」看的正是这一栏（07:04 事故的观测口）。
+  // **到点那件打红标**（`due`）：它这一轮会进对话，也是"提过就不再进"的记账对象。
+  // （原 `memo_candidates` 那一行随候选机制删除——那一路 2026-10-05 晚并进这里。）
+  (r.standing_memos||[]).forEach(x => {
+    const g = (x.group_name||"").trim();
+    m += `<div class="row"><span class="tag${x.due?" warn":""}">${x.due?t("到点了"):t("手上有")}</span>`
+      + `${g?`〔${esc(g)}〕`:""}${esc(x.id)}：${esc(x.content)}`
+      + `<span class="why">　（${esc(t(x.why||""))}）</span></div>`; });
+  // 一条都没想起来时，先说**卡在哪一步**——不然「这次没翻到东西」没有下文，
+  // 看的人只能去猜是 R0 没让翻、还是门太严、还是库里真没有。
+  if(r.stage) m += `<div class="why">${t("这一轮没想起东西（{why}）", {why: STAGE_LABEL[r.stage] || r.stage})}</div>`;
+  // 抑制名单优先显示**带原因**的那份：「为什么没有它」要有答案，
+  // 只有 id 的话，答案还留在别处（通常是没人记得去翻的代码里）。
+  const sup = r.suppressed_detail || [];
+  if(sup.length) m += `<div class="why">${t("没被带上：")}${sup.map(x => `${esc(x.id)} ${esc(x.why||"")}`).join("　")}</div>`;
+  else if(r.suppressed && r.suppressed.length) m += `<div class="why">${t("没被带上：")}${r.suppressed.map(esc).join(" ")}</div>`;
+  // 上下文总预算裁掉了什么，也要看得见：它连抑制名单都进不去
+  // （抑制是"命中但没排上"，被裁的是"排上了又因总量被拿掉"），
+  // 「应该出现的东西没出现」最难查，这里正是那一类。
+  const bd = r.budget || {};
+  if(bd.dropped && bd.dropped.length)
+    m += `<div class="why">${t("上下文超预算（{a} → {b} / {c}），裁掉：", {a: bd.before, b: bd.after, c: bd.budget})}${bd.dropped.map(esc).join("　")}</div>`;
+  else if(bd.alone)
+    m += `<div class="why">${t("当前消息本身就 {a} / {b}：记忆全裁了也装不下，正文可能被截断", {a: bd.before, b: bd.budget})}</div>`;
+  // air 这一轮动过什么（设计稿防错第 6 条：**可观测是它的兜底**）。
+  // air 说「我记下了」而这里空着，就是没做——不留文本协议，靠看得见。
+  (tools||[]).forEach(x => {
+    const long = (x.detail || "").length > ACT_FOLD_CHARS;   // 长回执同聊天区：折
+    m += `<div class="row"><span class="tag ${x.ok?"ok":"bad"}">${t("{p} 动手")}</span>`
+      + `${esc(x.name)}　` + (long
+        ? `<span class="why fold" style="display:block">${esc(x.detail)}</span>`
+        : `<span class="why" style="display:inline">${esc(x.detail)}</span>`) + `</div>`; });
+  const f = r.flags || {};
+  if(f.hint_talked_before) m += `<div class="why">${t("提示：你们聊过这个")}</div>`;
+  $("wakeMem").innerHTML = m || `<div class="empty">${t("这一轮没有注入记忆")}</div>`;
+  // 折叠块统一在这里绑（innerHTML 拼出来的，绑不了 onclick 属性）
+  $("wakeMem").querySelectorAll(".fold").forEach(el =>
+    el.addEventListener("click", () => el.classList.toggle("open")));
+
+  // 折叠条上给一句人能读的摘要——详情里那些 C1/R2/0.62 是给调试看的，
+  // 平时只需要知道「air 想起了几件事」。
+  // 折叠条上**也要提动作**：面板平时是收着的，动作写在里面等于没写。
+  const ns = (r.scenes||[]).length, np = (r.profiles||[]).length;
+  // ⚠️ 变量名不能再用 `acts`——上面（本函数内）已经有一个 `const acts = r.actions || {}`，
+  // 同一作用域里重复声明 const 是**语法错误**，整个脚本都会挂掉（按钮全失效）。
+  const actsDone = tools || [];
+  let sum = (ns || np)
+    ? t("这一轮想起 {n} 条场景", {n: ns}) + (np ? t(" · {n} 条常驻画像", {n: np}) : "")
+    : t("这一轮没有想起具体的场景（只注入了常驻画像）");
+  if(actsDone.length){
+    const bad = actsDone.filter(x => !x.ok).length;
+    sum += t(" · {p} 动过 {n} 下", {n: actsDone.length})
+      + (bad ? t("（{ok} 成、{bad} 没成）", {ok: actsDone.length - bad, bad})
+             : t("（都成了）"));
+  }
+  $("wakeSummary").textContent = sum + t(" —— 点开看为什么");
+  $("wakeWrap").classList.toggle("acted", actsDone.length > 0);
+}
+const fmt = (v) => (v===null||v===undefined) ? "-" : (typeof v==="number" ? v.toFixed(3) : v);
+
+/* ---------- 左侧导航 ---------- */
+function renderTabs(){
+  let h = "", grp = "";
+  // ⚠️ 循环变量不能叫 `t`——会遮住全局的翻译函数（同 1062 行那条教训）
+  TABS.forEach((name, i) => {
+    const g = i === 0 ? "" : (NAV_GROUP[name] || "记忆库");
+    if(g !== grp){ if(g) h += `<div class="grp">${t(g)}</div>`; grp = g; }
+    h += `<button class="${name===activeTab?"active":""}" onclick="switchTab('${name}')">${t(name)}</button>`;
+  });
+  $("side").innerHTML = h;
+}
+function switchTab(t){ activeTab = t; renderTabs(); refreshPanel(); }
+function toggleNav(){ $("main").classList.toggle("nav-hidden"); }
+// 右列收起/展开（宽屏）：状态在 body.aside-hidden，按钮文字跟着翻。
+// 与 ☰ 同一规矩：不持久化——刷新恢复默认（展开）。
+function renderAsideBtn(){
+  $("asideBtn").textContent = t(document.body.classList.contains("aside-hidden") ? "展开" : "收起");
+}
+function toggleAside(){
+  document.body.classList.toggle("aside-hidden");
+  renderAsideBtn();
+  // 收起就是收起（2026-09-21 按反馈改）：**右列让位，内容留在右列**。
+  // 旧行为是把「更早的对话」（压缩摘要那些块）搬进对话区顶部——结果收起后
+  // 顶上冒出一坨摘要，与中间的「原文」重复、还打断对话流
+  // （原话："点收起之后……反正摘要出来了"）。入口不缺：按钮就在顶栏，展开即见。
+  // （窄屏本来没有右列，整个函数对它只意味着按钮不存在。）
+}
+// 「这一轮想起了什么」默认折起来：它是调试用的，不该常驻占地方。
+function toggleWake(){ $("wakeWrap").classList.toggle("open"); }
+
+async function refreshPanel(){
+  // 对话和视图共用中间那一格：对话是常驻的，视图点开才盖上来。
+  const isChat = activeTab === "对话";
+  $("chatView").style.display = isChat ? "" : "none";
+  $("panelView").style.display = isChat ? "none" : "";
+  if(isChat) return;                 // 对话内容由 send() 维护，不重渲染
+  const p = $("panel");
+  let html = "";
+  try{
+    if(activeTab === "档案") html = await viewFacts();
+    else if(activeTab === "画像") html = await viewMirror();
+    else if(activeTab === "场景") html = await viewScenes();
+    else if(activeTab === "摘要") html = await viewSummaries();
+    else if(activeTab === "备忘录") html = await viewMemos();
+    else if(activeTab === "实体") html = await viewEntities();
+    else if(activeTab === "主题") html = await viewTopics();
+    else if(activeTab === "打捞") html = await viewSalvage();
+    else if(activeTab === "留痕") html = await viewTrace();
+    else if(activeTab === "语音") html = await viewVoice();
+    else if(activeTab === "设置") html = await viewSettings();
+  }catch(e){ html = `<div class="empty">${t("读取失败：")}${esc(e.message)}</div>`; }
+  p.innerHTML = pageHead(activeTab) + html;   // 页头在这一处加，各 view 不用管
+}
+
+async function viewFacts(){
+  const d = await api("/api/facts");
+  const list = d.facts || [];
+  const have = {};
+  list.forEach(f => have[f.key] = f);
+  // 常用键由后端给（`model.FACT_KEYS`）——页面里不抄一份，抄了就会漂移
+  const keys = [...new Set([...(d.base||[]), ...list.map(f => f.key)])];
+  const rows = keys.map(k => {
+    const f = have[k] || {};
+    const tag = f.source === "inferred" ? `<span class="tag warn">${t("{p} 推的")}</span>` : "";
+    const note = f.note ? `<div class="why">${esc(f.note)}</div>` : "";
+    return `<label>${esc(k)}</label>
+      <div><input class="f" data-fact="${esc(k)}" value="${esc(f.value||"")}"
+                  placeholder="${t("（没填）")}">${tag}${note}</div>`;
+  }).join("");
+  return `
+  <div class="grid2" id="factGrid">${rows}</div>
+  <div style="margin-top:16px;display:flex;gap:8px;align-items:center">
+    <button class="primary" onclick="saveFacts()">${t("保存")}</button>
+    <button class="ghost" onclick="addFactRow()">${t("加一项")}</button>
+    <span class="why" style="margin-left:4px">${t("清空一格 = 让 {p} 忘掉这条。保存后下一句生效。")}</span>
+  </div>`;
+}
+async function saveFacts(){
+  const facts = {};
+  document.querySelectorAll("[data-fact]").forEach(el => { facts[el.dataset.fact] = el.value.trim(); });
+  try{
+    const d = await api("/api/facts", {method:"POST",
+      headers:{"Content-Type":"application/json"}, body: JSON.stringify({facts})});
+    alert(t("已保存 {n} 项（清空的那些已经忘掉了）。", {n: d.saved}));
+    switchTab("档案");
+  }catch(e){ alert(t("保存失败：") + e.message); }
+}
+function addFactRow(){
+  const k = prompt(t("新增哪一项？（例如：家乡 / 生日 / 想被怎么称呼）"));
+  if(!k || !k.trim()) return;
+  const name = k.trim();
+  const label = document.createElement("label");
+  label.textContent = name;
+  const wrap = document.createElement("div");
+  wrap.innerHTML = `<input class="f" data-fact="${esc(name)}" placeholder="${t("（没填）")}">`;
+  $("factGrid").append(label, wrap);
+}
+async function viewMirror(){
+  const d = await api("/api/mirror");
+  // 「整理」放在这里而不是对话区：它和「新对话」是**包含关系**——
+  // 新对话 = 提取 + 整理 + 清窗口；这里只是把已有的重新归置一遍，不动当前对话。
+  // 两个按钮并排摆着会让人以为它们等价（看着确实像，问出来了）。
+  const bar = `<div class="why" style="display:flex;align-items:center;gap:10px;margin-bottom:10px">
+    <span style="margin:0">${t("刚聊完、还没形成画像时，点右边跑一遍。")}</span>
+    <button class="ghost" onclick="runDistill()">${t("重新整理")}</button></div>`;
+  // 上次整理干了什么（数据在 `/api/mirror` 里）：按了按钮总得看见结果——
+  // 新增/收敛/老化这些数字在这儿；「没立的画像卡在哪一关」也在这儿说清楚
+  //（「画像没立」本身不含任何可行动信息，这是设计里点名的调试点）。
+  // 2026-09-23：体检的结果也走同一处（带 trigger 字段的就是体检，记忆整理稿 §九）
+  const ld = d.last_distill || {};
+  const n = (a) => (a || []).length;
+  const ldHead = ("s2_new" in ld)
+    ? (ld.trigger ? t("上次体检（{why}）：", {why: ld.trigger}) : t("上次整理："))
+      + t("S2 新增 {a} · S3 新增 {b} · 维持 {c} · 修正 {d} · 收敛 {e} · 老化 {f}",
+          {a: n(ld.s2_new), b: n(ld.s3_new), c: n(ld.held),
+           d: n(ld.revised), e: n(ld.established), f: n(ld.aged)})
+    : t("还没跑过整理。");
+  const rv = ld.review || {};
+  const rvLine = n(rv.checked)
+    ? `<div class="why" style="margin:-4px 0 8px">${
+        t("复核 {n} 条：降档 {d} · 复查降 {g} · 重写 {r} · 建议删 {w}",
+          {n: n(rv.checked), d: n(rv.downgraded), g: n(rv.regressed),
+           r: n(rv.reworded), w: n(rv.suggested)})}</div>`
+    : "";
+  const ldLine = `<div class="why" style="margin:-6px 0 8px">${ldHead}</div>` + rvLine;
+  const reviews = d.reviews || [];
+  // 复核提议（记忆整理稿 §五）：她打了 wrong 的那几条——**只建议不执行**。
+  // 两个动作给全：「删除」走人的否决（同一个出口，真删），「留着」只让提议过期。
+  const reviewsLine = reviews.length ? `
+    <div class="why" style="margin:0 0 12px;padding:8px 10px;border:1px solid #d9a441;border-radius:6px">
+      <b>${t("{p} 的复核提议（{n} 条）：复查后觉得不对，等你裁决——删掉要你点，{p} 不会自己动。", {n: reviews.length})}</b>
+      ${reviews.map(r => `<div style="margin:6px 0 0">
+        <span class="mono">${esc(r.profile_id)}</span> ${esc(r.statement)}
+        <div class="why">${t("理由：")}${esc(r.reason || t("（没给理由）"))}</div>
+        <button class="ghost" data-pid="${esc(r.profile_id)}" data-stmt="${esc(r.statement)}" onclick="rejectProfile(this)">${t("删除")}</button>
+        <button class="ghost" onclick="keepReview('${esc(r.id)}')">${t("留着")}</button>
+      </div>`).join("")}
+    </div>` : "";
+  const blockedLine = n(ld.blocked)
+    ? `<div class="why" style="margin:0 0 14px">${t("未收敛（为什么没立）：")}`
+      + ld.blocked.slice(0, 5).map(b =>
+          `${esc(b.id)}「${esc(b.topic)}」${esc(b.reason)}`).join("；")
+      + `</div>`
+    : "";
+  if(!d.profiles.length)
+    return bar + ldLine + reviewsLine + blockedLine
+      + `<div class="empty">${t("还没有画像——再多聊几轮，或点「重新整理」看看现在能抽出什么。")}</div>`;
+  let h = bar + ldLine + reviewsLine + blockedLine
+    + `<table><tr><th style="width:88px">id</th><th>${t("陈述")}</th><th style="width:90px">${t("状态")}</th><th style="width:60px">${t("印证")}</th><th>${t("依据")}</th><th style="width:150px">${t("操作")}</th></tr>`;
+  d.profiles.forEach(p => {
+    const tag = p.status === "established" ? `<span class="tag ok">${t("已立")}</span>`
+                                           : `<span class="tag warn">${t("猜测")}</span>`;
+    const src = p.sources.map(s =>
+      `<div class="mono">${s.role === "forming" ? t("◆ 出处") : t("· 印证")} ${esc(s.id)} `
+      + `(${esc(s.time)}) ${esc(s.title)}</div>`).join("");
+    const hid = p.hidden_sensitive ? `<div class="why">${t("另有 {n} 条依据涉及隐私，未展示", {n: p.hidden_sensitive})}</div>` : "";
+    // 「不对」按钮对应「哪条不对你直接说」——那条提示以前只是句文案，没有可以说的入口。
+    // **真删**（2026-09-24）：删的是一条不成立的推断——素材都在，判断真成立会重立；
+    // 唯一要防的是误操作，所以弹一次确认窗（statement 经 data- 属性带，避开引号）。
+    h += `<tr><td class="mono">${esc(p.id)}</td><td>${esc(p.statement)}
+      <div class="why">${esc((p.topics||[p.topic]).join(" / "))}</div></td><td>${tag}</td><td class="mono">${p.evidence}</td>
+      <td>${src}${hid}</td>
+      <td><button class="ghost" onclick="editProfile('${esc(p.id)}')">${t("改")}</button>
+          <button class="ghost" onclick="editProfileTopic('${esc(p.id)}')">${t("改主题")}</button>
+          <button class="ghost" data-pid="${esc(p.id)}" data-stmt="${esc(p.statement)}" onclick="rejectProfile(this)">${t("不对")}</button></td></tr>`;
+  });
+  h += `</table>`;
+  if(d.patterns && d.patterns.length){
+    h += `<h2 style="margin:16px 0 6px">${t("模式统计（人做不到，{p} 可以）")}</h2><table>
+      <tr><th>${t("情境 × 对象")}</th><th style="width:60px">${t("次数")}</th><th>${t("典型反应")}</th></tr>`;
+    d.patterns.forEach(x => {
+      h += `<tr><td>${t("面对【{a}】的【{b}】", {a: esc(x.entity), b: esc(x.trigger_class)})}</td>
+        <td class="mono">${x.count}</td><td>${x.reactions.map(esc).join(" / ") || "—"}</td></tr>`;
+    });
+    h += `</table>`;
+  }
+  if(d.can_reject) h += `<div class="why" style="margin-top:10px">${esc(d.reject_hint)}${t("——右边「不对」即可删掉它；「改」走修正（旧版进历史、新版重新攒印证）。")}</div>`;
+  return h;
+}
+
+async function rejectProfile(btn){
+  // 否决一条画像 = **真删**（2026-09-24）：删的是"一条不成立的推断"——
+  // 素材（原话 / 场景 / 摘要）都在，判断真成立会被重新立出来。
+  // 所以不需要"留后路"那一档：唯一要防的是误操作，弹一次确认窗就够。
+  // 参数收按钮而不是 id：statement 经 data- 属性来——`esc` 不转单引号，
+  // 拼进 onclick('...') 会被他话里的撇号打断。
+  const id = btn.dataset.pid, stmt = btn.dataset.stmt || "";
+  if(!confirm(t("删掉 {id}「{statement}」？\n\n素材都在（原话 / 场景 / 摘要）——这条判断真成立的话，以后会重新立出来。",
+                {id, statement: stmt}))) return;
+  try{
+    const d = await api("/api/reject", {method:"POST", headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({id})});
+    if(!d.ok){ alert(t("没找到这条画像")); return; }
+    bubble("sys", "系统", t("已删掉 {id}。", {id}));
+    refreshAll();
+  }catch(e){ alert(t("删除失败：") + e.message); }
+}
+
+async function keepReview(id){
+  // 「留着」：人看过提议、决定不动这条画像——提议过期，画像一个字不改。
+  // 不弹确认：这是**保守**选项（什么都不发生），点错了的代价是零。
+  try{
+    await api("/api/reviews", {method:"POST", headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({id})});
+    refreshAll();
+  }catch(e){ alert(t("操作失败：") + e.message); }
+}
+
+function editProfile(id){
+  // 改一条判断的说法（三层同一套）：**走修正**——旧版本填 `invalidated_at`
+  // 进历史，新版回 pending **重新攒印证**（判断不能凭空改写：改了就是新判断）。
+  const text = prompt(t("改成什么？（{id} 的陈述）\n\n改完之后是**新判断**：旧说法进历史，新说法回去重新攒印证。", {id}), "");
+  if(text === null) return;
+  memAction([id], "update", text);
+}
+function editProfileTopic(id){
+  // 改主题（**标签**，2026-09-24）：改的是归类——判断本身不动
+  // （依据链、印证数、时间戳照旧；与「改」走修正的区别就在这）。
+  const topic = prompt(t("新主题是什么？（{id}）\n\n1-3 个，逗号隔开（第一个是主主题）。改的是归类：判断本身不动，依据和印证照旧。", {id}), "");
+  if(topic === null) return;
+  memAction([id], "update", topic, "主题");
+}
+
+function deleteMany(){
+  // 批量删：一次填多个编号（**三层混着填也行**——后端按前缀分派）。
+  // "先校验再动手"在后端（`weave.delete_by_layer`）：有一个找不到就一条都不删。
+  const raw = prompt(t("要删哪些？编号用逗号或空格隔开\n（例如 S1-0001,S1-0003）"), "");
+  if(raw === null) return;
+  const ids = raw.split(/[,，、;；\s]+/).map(s => s.trim()).filter(Boolean);
+  if(!ids.length) return;
+  memAction(ids, "delete");
+}
+
+async function viewScenes(){
+  const d = await api("/api/scenes");
+  if(!d.length) return `<div class="empty">${t("还没有场景。聊几句 → 新对话（或话题切换）就会提取。")}</div>`;
+  let h = `<div style="margin-bottom:10px;display:flex;gap:8px;align-items:center">
+    <button class="ghost" onclick="deleteMany()">${t("批量删…")}</button>
+    <span class="why" style="margin-left:4px">${t("编号用逗号隔开；删=真删（没备份），要留后路用「归档」——归档的还能回热层。")}</span></div>`;
+  h += `<table><tr><th style="width:82px">id</th><th>${t("标题 / 摘要")}</th><th style="width:130px">${t("情境 → 反应")}</th>
+    <th style="width:96px">${t("情绪")}</th><th style="width:52px">${t("强度")}</th><th style="width:74px">${t("计数")}</th><th style="width:90px">${t("主题")}</th><th style="width:140px">${t("操作")}</th></tr>`;
+  d.forEach(s => {
+    const flags = [s.sensitive?`<span class="tag sen">${t("敏感")}</span>`:"", s.archived?`<span class="tag">${t("冷层")}</span>`:"",
+      s.has_vec?`<span class="tag ok">vec</span>`:`<span class="tag warn">${t("无vec")}</span>`].join("");
+    // 改 / 归档 / 删都是**人的动作**：他的记忆他定。删=真删（无备份无留痕），
+    // 要留后路走「归档」——她不召回它，数据全在、可回热层（2026-09-23，工具箱稿 §3.4）。
+    h += `<tr><td class="mono">${esc(s.id)}</td>
+      <td>${esc(s.title)} ${flags}<div class="why">${esc(s.text)}</div></td>
+      <td class="why">${esc(s.trigger||"—")} → ${esc(s.reaction||"—")}<br>${esc(s.trigger_class||"")}</td>
+      <td class="mono">v=${s.valence??"?"} a=${s.arousal??"?"}</td>
+      <td class="mono">${s.intensity}</td>
+      <td class="mono">${t("提{m} 引{c}", {m: s.mention, c: s.cited})}</td>
+      <td class="why">${esc(s.topic)}<br>${esc((s.entities||[]).join(","))}</td>
+      <td><button class="ghost" onclick="editScene('${esc(s.id)}')">${t("改")}</button>
+          <button class="ghost" onclick="${s.archived?"unarchiveScene":"archiveScene"}('${esc(s.id)}')">${s.archived?t("回热层"):t("归档")}</button>
+          <button class="ghost" onclick="deleteScene('${esc(s.id)}')">${t("删")}</button></td></tr>`;
+  });
+  return h + `</table>`;
+}
+
+// ---- 记忆动作的统一口（2026-09-24，工具箱稿 §3.4）----
+// 改 / 删 / 归档 / 取消归档——**三层同一个口**（场景 / 摘要 / 画像）。
+// 后端按编号前缀分派（`/api/memory-action` → `weave.*_by_layer`）：
+// 对话里她提议、他点确认条，是**另一条入口**，落到同一批动作上。
+// `ids` 可以多条（删除 / 归档 / 取消都是"要么全动、要么不动"）；改一次一条。
+async function memAction(ids, action, text, field){
+  if(action === "delete"){
+    const msg = ids.length === 1
+      ? t("真删掉 {id}？\n\n没有备份，删了就没了——要留后路请用「归档冷存」。", {id: ids[0]})
+      : t("真删掉这 {n} 条？\n{ids}\n\n没有备份，删了就没了——要留后路请用「归档」。",
+          {n: ids.length, ids: ids.join("、")});
+    if(!confirm(msg)) return;
+  }
+  try{
+    const d = await api("/api/memory-action", {method:"POST",
+      headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({ids, action, text, field})});
+    if(!d.ok){ alert(d.detail || t("没成")); return; }
+    const done = d.ids && d.ids.length ? d.ids : [];
+    if(!done.length){
+      // 归档已在冷层的、取消已在热层的：动作有效但一条都没变——如实说，别假装做了
+      bubble("sys", "系统", t("没动——它已经在那个状态了。"));
+      refreshAll(); return;
+    }
+    const idsS = done.join("、");
+    if(action === "delete") bubble("sys","系统", t("已删 {ids}——真删，没有备份。", {ids: idsS}));
+    if(action === "archive") bubble("sys","系统", t("已归档 {ids}——{p} 不会再想起它，数据都在，还能捞回来。", {ids: idsS}));
+    if(action === "unarchive") bubble("sys","系统", t("已把 {ids} 放回热层。", {ids: idsS}));
+    if(action === "update") bubble("sys","系统", t("已改 {id}：旧值留在留痕里了。", {id: ids[0]}));
+    refreshAll();
+  }catch(e){ alert(t("操作失败：") + e.message); }
+}
+
+// 下面几个是台账页按钮的入口（语义名保留）：都走上面那个统一口。
+function editScene(id){
+  // 改场景的**可改字段**（2026-09-24）：先问改哪个（默认摘要），再问新值。
+  // 能改 = 语义描述类：摘要 / 标题 / 主题 / 事件时间 / 情境 / 反应 / 情境类
+  // （数值与系统字段不开——见后端 `store.SCENE_EDITABLE`）。
+  // 原文永远不动，改前的值会留痕（分清「当时发生什么」和「后来怎么理解」）。
+  const field = prompt(t("改哪个字段？（摘要 / 标题 / 主题 / 事件时间 / 情境 / 反应 / 情境类）"), t("摘要"));
+  if(field === null) return;
+  const f = (field || "").trim() || "摘要";
+  const text = prompt(t("改成什么？（{id} 的{field}）", {id, field: f}), "");
+  if(text === null) return;
+  memAction([id], "update", text, f);
+}
+function archiveScene(id){ memAction([id], "archive"); }
+function unarchiveScene(id){ memAction([id], "unarchive"); }
+function deleteScene(id){ memAction([id], "delete"); }
+
+async function viewSummaries(){
+  const d = await api("/api/summaries");
+  if(!d.length) return `<div class="empty">${t("还没有摘要——同一主题攒够 3 条场景才聚合。")}</div>`;
+  let h = `<table><tr><th style="width:82px">id</th><th>${t("聚合叙述")}</th><th style="width:180px">${t("主题")}</th><th>${t("原料")}</th><th style="width:200px">${t("操作")}</th></tr>`;
+  d.forEach(x => {
+    // 改与删**三层同一套**（2026-09-24）：摘要和场景 / 画像一样能改、能归档、能删；
+    // 「改主题」是改**标签**（原地改，叙述与素材都不动）——走 `memAction` 的 field 通道。
+    h += `<tr><td class="mono">${esc(x.id)}</td><td>${esc(x.text)}</td>
+      <td class="why">${esc((x.topics||[x.topic]).join(" / "))}</td><td class="mono">${x.sources.map(esc).join(" ")}</td>
+      <td><button class="ghost" onclick="editSummary('${esc(x.id)}')">${t("改")}</button>
+          <button class="ghost" onclick="editSummaryTopic('${esc(x.id)}')">${t("改主题")}</button>
+          <button class="ghost" onclick="${x.archived?"unarchiveSummary":"archiveSummary"}('${esc(x.id)}')">${x.archived?t("回热层"):t("归档")}</button>
+          <button class="ghost" onclick="deleteSummary('${esc(x.id)}')">${t("删")}</button></td></tr>`;
+  });
+  return h + `</table>`;
+}
+function editSummary(id){
+  // 改叙述（理解层）：旧值留痕——同场景那条的理由（"后来怎么理解的"变了）。
+  const text = prompt(t("改成什么？（{id} 的叙述）", {id}), "");
+  if(text === null) return;
+  memAction([id], "update", text);
+}
+function editSummaryTopic(id){
+  // 改主题（**标签**，2026-09-24）：聚合按主题走，改它就是重新归类——
+  // 叙述与它的素材一个都不动（与「改」走留痕修正不同）。
+  const topic = prompt(t("新主题是什么？（{id}）\n\n1-3 个，逗号隔开（第一个是主主题）。改的是归类：叙述和它的素材都不动。", {id}), "");
+  if(topic === null) return;
+  memAction([id], "update", topic, "主题");
+}
+function archiveSummary(id){ memAction([id], "archive"); }
+function unarchiveSummary(id){ memAction([id], "unarchive"); }
+function deleteSummary(id){ memAction([id], "delete"); }
+
+async function viewMemos(){
+  const d = await api("/api/memos");
+  if(!d.length) return `<div class="empty">${t("还没有备忘录。")}</div>`;
+  // 这一页是**审计面**（右侧面板是操作面）：多给时间依据 / 状态 / 敏感三列——
+  // 「她怎么还没提」「为什么到期了」这类问题只有这里答得出。
+  // 「划掉」与右侧面板共用 `closeMemo`（同一个动作、三个入口）。
+  let h = `<table><tr><th style="width:70px">id</th><th style="width:100px">${t("事项")}</th><th>${t("内容")}</th><th style="width:90px">${t("来源")}</th>
+    <th style="width:120px">${t("时间依据")}</th><th style="width:70px">${t("状态")}</th><th style="width:60px">${t("敏感")}</th>
+    <th style="width:64px"></th></tr>`;
+  d.forEach(m => {
+    const basis = m.due_at ? t("明说 {d}", {d: esc(m.due_at.slice(0,10))})
+      : (m.window_days ? `${esc(m.kind_class)} + ${m.window_days}${t("天")}` : t("（无）"));
+    h += `<tr><td class="mono">${esc(m.id)}</td><td class="why">${esc(m.group_name || "—")}</td><td>${esc(m.content)}
+      ${m.due_now?`<span class="tag warn">${t("已到期")}</span>`:""}</td>
+      <td class="why">${m.kind==="air_promise"?t("{p} 的承诺"):t("用户的事")}</td>
+      <td class="mono">${basis}</td><td class="mono">${esc(m.status)}</td>
+      <td>${m.raise_mode>=2?`<span class="tag sen">${t("不提")}</span>`:"—"}</td>
+      <td><button class="ghost" onclick="closeMemo('${esc(m.id)}')">${t("划掉")}</button></td></tr>`;
+  });
+  // （表尾原来还有一句「到期就进注入……一轮最多一件」——与页头 PAGE_NOTE 说的是
+  //   同一件事，2026-10-07 去掉；那条"一轮最多一件"并进了页头，一处说全。）
+  return h + `</table>`;
+}
+
+async function viewEntities(){
+  const d = await api("/api/entities");
+  if(!d.length) return `<div class="empty">${t("还没有实体。")}</div>`;
+  // 「最近交互」列（2026-09-25）：last_at 是关联场景里最新一条的时间（后端派生），
+  // 窗口内加「活跃」标签——活跃只是**给人看的一眼**（排序也按它倒序），
+  // 不参与召回、不触发删除（沉寂的名字恰恰是长程记忆该留着的）。
+  let h = `<table><tr><th style="width:70px">id</th><th>${t("名称")}</th><th style="width:80px">${t("类别")}</th>
+    <th>${t("关系")}</th><th style="width:120px">${t("别名")}</th><th style="width:70px">${t("关联场景")}</th>
+    <th style="width:120px">${t("最近交互")}</th><th style="width:90px"></th></tr>`;
+  d.forEach(e => { h += `<tr><td class="mono">${esc(e.id)}</td><td>${esc(e.name)}</td>
+    <td class="why">${esc(e.kind)}</td><td class="why">${(e.relations||[]).map(esc).join("、")||"—"}</td>
+    <td class="mono">${(e.aliases||[]).map(esc).join(" ")||"—"}</td>
+    <td class="mono">${e.scenes}</td>
+    <td class="mono">${e.last_at ? esc(e.last_at.slice(0,10)) : "—"}${e.active ? ` <span class="tag ok">${t("活跃")}</span>` : ""}</td>
+    <td><button class="ghost" onclick="mergeEntity('${esc(e.id)}')">${t("并到…")}</button></td></tr>`; });
+  return h + `</table>`;
+}
+
+/* 把两个实体合成一个（「两个小明是同一个人」）——**只有人能发起**：
+   系统只做精确匹配 + 别名，"是不是同一个人"是语义判断，猜错的代价
+   是把两条线索悄悄并成一条（见 entity.link_entities 的保守原则）。
+   实体的"人工口子"就是这个——add_entity 的 aliases 参数一直够不着。 */
+async function mergeEntity(fromId){
+  const list = await api("/api/entities");
+  const src = list.find(x => x.id === fromId);
+  if(!src) return;
+  const others = list.filter(x => x.id !== fromId);
+  if(!others.length){ alert(t("只有一个实体，没有可并的对象。")); return; }
+  const hint = others.map(x => x.name
+    + ((x.aliases||[]).length ? `（${x.aliases.join("、")}）` : "")).join("、");
+  const to = (window.prompt(
+    t("把「{name}」并进哪个实体？填它的名字：", {name: src.name}) + "\n\n" + hint) || "").trim();
+  if(!to) return;
+  const hit = others.find(x => x.name === to || (x.aliases||[]).includes(to));
+  if(!hit){ alert(t("没找到叫「{name}」的实体。", {name: to})); return; }
+  if(!confirm(t("把「{a}」并进「{b}」？\n\n它名下 {n} 条场景会改挂过去，不删记录、会留痕。\n合并不可撤回——只能反着再合一次。", {a: src.name, b: hit.name, n: src.scenes}))) return;
+  try{
+    const d = await api("/api/entity-merge", {method:"POST",
+      headers:{"Content-Type":"application/json"}, body: JSON.stringify({from: fromId, to: hit.id})});
+    if(!d.ok){ alert(t("合并失败：") + (d.detail || "")); return; }
+    alert(t("已合并：{n} 条场景改挂到「{b}」，{k} 个别名并了过去。", {n: d.scenes, b: d.name, k: d.aliases}));
+    switchTab("实体");
+  }catch(e){ alert(t("合并失败：") + e.message); }
+}
+
+// （原 `viewEdges()` 已撤，2026-09-24：`edges` 表退役——见 `TABS` 上面那段说明。）
+
+/* 打捞：从**原文**里翻东西。先按日期缩范围，再按语义找。
+   **删掉的场景也找得到**——删的是「理解」，原文没动。
+   这不是每轮唤醒会走的路（原文没有索引，是翻文件，慢），是你要找东西时翻的。 */
+async function viewSalvage(){
+  return `
+  <div style="display:flex;gap:8px;align-items:center;margin-bottom:12px;flex-wrap:wrap">
+    <input id="svQ" placeholder="${t("找什么（可空 = 只按日期）")}" style="flex:1;min-width:180px">
+    <input id="svFrom" type="date" title="${t("从哪天")}">
+    <input id="svTo" type="date" title="${t("到哪天")}">
+    <button onclick="runSalvage()">${t("翻一下")}</button>
+  </div>
+  <div id="svOut"><div class="empty">${t("填个词或选个日期，点「翻一下」。")}</div></div>`;
+}
+
+function salvageTable(rows){
+  if(!rows.length) return `<div class="empty">${t("这个范围里没有。换个词，或者把日期放宽。")}</div>`;
+  let h = `<table><tr><th style="width:88px">${t("编号")}</th><th style="width:150px">${t("日期 时间")}</th>
+    <th>${t("原文片段")}</th><th style="width:140px">${t("库里")}</th></tr>`;
+  rows.forEach(r => {
+    h += `<tr><td class="mono">${esc(r.scene_id)}</td>
+      <td class="mono">${esc(r.day)} ${esc((r.time || "").slice(0, 8))}</td>
+      <td>${esc(r.snippet)}</td>
+      <td>${r.in_library ? `<span class="tag ok">${t("在")}</span>`
+        : `<span class="tag warn">${t("已删")}</span>
+           <button class="ghost"
+             onclick="salvageRebuild('${esc(r.scene_id)}','${esc(r.day)}')">${t("重新记下")}</button>`}</td></tr>`;
+  });
+  return h + `</table>`;
+}
+
+async function runSalvage(){
+  const out = $("svOut"); if(!out) return;
+  const q = ($("svQ") || {}).value || "";
+  const from = ($("svFrom") || {}).value || "", to = ($("svTo") || {}).value || "";
+  out.innerHTML = `<div class="empty">${t("翻原文中…")}</div>`;
+  try{
+    const d = await api(`/api/salvage?q=${encodeURIComponent(q)}&from=${from}&to=${to}&limit=30`);
+    out.innerHTML = salvageTable(d.rows || []);
+  }catch(e){ out.innerHTML = `<div class="empty">${t("没查成：")}${esc(e.message)}</div>`; }
+}
+
+async function salvageRebuild(sid, day){
+  // ⚠️ 删掉了一句**不实**的说辞（2026-10-07）：原来写"删除前的状态在
+  // data/backups/ 的快照里"——`weave.delete_scene_confirmed` 现在是**真删、
+  // 不留快照、不留痕**（它自己的 docstring 写着"原来还有①备份③留痕，已去"）。
+  // `data/backups/` 里只有**每日**快照，不是"删除前"那一刻的——拿它当后路是哄人。
+  if(!confirm(t("照着原文重新记一遍 {id}？\n\n这会新起一条记忆（新编号），\n不是撤销删除——删掉的就是删掉了（要留后路，删之前用「归档」）。", {id: sid}))) return;
+  try{
+    const d = await api("/api/salvage-rebuild", {method:"POST",
+      headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({scene_id: sid, day})});
+    alert(d.detail || t("记下了"));
+    switchTab("打捞");
+  }catch(e){ alert(t("没做成：") + e.message); }
+}
+
+/* 留痕页（2026-10-07 重写分派）：**按 `kind` 分**，不再靠字段猜形状。
+   猜的那版有三处走样：「工具」「档案」「场景改动」都掉进最后的 else，被硬当
+   "漂移检测"渲染——"检查 undefined 个主题，漂移 0 个"就是这么冒出来的。
+   `kind` 由后端按文件名前缀补上（见 `dashboard.App.trace`）。
+
+   一行 = 她做过的一件事：怎么判的（唤醒）、动了什么（工具 / 备忘 / 档案 / 场景）、
+   整理与漂移一遍。**认不出的类别就如实显示它是什么**，不冒充别的。 */
+async function viewTrace(){
+  const d = await api("/api/trace?limit=25");
+  if(!d.length) return `<div class="empty">${t("还没有留痕。每次唤醒都会落一行。")}</div>`;
+  let h = "";
+  // ⚠️ 循环变量不能叫 `t`（会遮住全局翻译函数）——用 `rec`（一条 trace 记录）
+  // 时间戳：**跨天要看得见日期**。现在读的是最近若干份文件（可能横跨几天），
+  // 只写 HH:MM 的话，昨天那条和刚刚那条分不出来。当天只写时刻，更早的带上月-日。
+  const today = new Date();
+  const todayKey = `${today.getFullYear()}-${String(today.getMonth()+1).padStart(2, "0")}`
+    + `-${String(today.getDate()).padStart(2, "0")}`;
+  d.forEach(rec => {
+    const day = (rec.ts || "").slice(0, 10), hm = (rec.ts || "").slice(11, 16);
+    const ts = `<span class="t">${esc(day === todayKey ? hm : `${day.slice(5)} ${hm}`)}</span>`;
+    let body;
+    if(rec.kind === "唤醒" || rec.input !== undefined){
+      // 她开口之前系统判了什么：想起谁、凭什么、压住了谁、手上挂着哪几件
+      const r = (rec.recalled||[]).map(x => `${esc(x.id)}(${esc(x.why)})`).join("；") || t("（无）");
+      body = `<b>${esc(rec.input||"")}</b>
+        <div class="why">${t("动作")} ${esc(JSON.stringify(rec.actions||{}))}</div>
+        <div class="why">${t("召回")} ${r}</div>
+        ${rec.suppressed && rec.suppressed.length ? `<div class="why">${t("抑制")} ${rec.suppressed.map(esc).join(" ")}</div>`:""}
+        ${(rec.standing_memos||[]).length ? `<div class="why">${t("手上有")} ${rec.standing_memos.map(esc).join(" ")}`
+          + `${(rec.memos_due||[]).length ? `　·　${t("到点")} ${rec.memos_due.map(esc).join(" ")}`:""}</div>`:""}`;
+    } else if(rec.kind === "备忘"){
+      // 「这条为什么不再提了」的答案在这儿（字段见 `memo.write_memo_trace`）
+      body = `<b class="drift">${t("备忘")} · ${esc(t(rec.act||""))}</b> ${esc(rec.id||"")}
+        <div class="why">${esc(rec.content||"")}${rec.by?`　·　${esc(t(rec.by))}`:""}</div>`;
+    } else if(rec.kind === "工具"){
+      // 她的手：这一轮调了什么、成没成（三档权限都从这儿看）。
+      // `detail` 是她拿到的东西——memory_search 那种能到几千字，**截断**：
+      // 这一页是"最近发生了什么"的流水，不是读结果的地方（要看全文去对话里点开回执）
+      const det = rec.detail || "";
+      body = `<b class="drift">${t("工具")} · ${esc(rec.tool||"")}</b>
+        <div class="why">${esc(det.length > 400 ? det.slice(0, 400) + "…" : det)}</div>
+        ${rec.ok ? "" : `<div class="why">${t("没做成：")}${esc(JSON.stringify(rec.args||{}))}</div>`}`;
+    } else if(rec.kind === "漂移"){
+      // 渐变：她长期形成的判断有没有在慢慢挪（只提疑问，不动手）
+      body = `<b class="drift">${t("漂移检测")}</b>
+        <div class="why">${t("检查 {n} 个主题，漂移 {m} 个", {n: rec.checked, m: (rec.drifting||[]).length})}
+        ${(rec.revised||[]).length?t("，修正 ")+rec.revised.map(esc).join(" "):""}</div>
+        ${(rec.drifting||[]).map(x=>`<div class="why">· ${esc(x.topic)}：${esc(x.reason)} → ${esc(x.verdict)}</div>`).join("")}`;
+    } else if(rec.kind === "整理"){
+      // 体检：这一趟整理做了什么（S2 聚合 / S3 抽象 / 收敛 / 老化）
+      body = `<b class="drift">${t("体检")}</b>${rec.trigger?`　<span class="why">${esc(rec.trigger)}</span>`:""}
+        <div class="why">${t("S2 新增 {a} · S3 新增 {b} · 维持 {c} · 修正 {d} · 收敛 {e} · 老化 {f}",
+          {a:(rec.s2_new||[]).length, b:(rec.s3_new||[]).length, c:rec.held||0,
+           d:(rec.revised||[]).length, e:(rec.established||[]).length, f:(rec.aged||[]).length})}</div>`;
+    } else if(rec.kind === "档案" || rec.kind === "场景改动"){
+      // 他手填的档案 / 场景字段的改动（改了哪个字段、从什么改成什么）
+      body = `<b class="drift">${t(rec.kind)}</b> ${esc(rec.key || rec.id || "")}
+        <div class="why">${rec.field?`${esc(rec.field)}：`:""}${esc(rec.from||"")} → ${esc(rec.to||"")}`
+        + `${rec.action?`　·　${esc(t(rec.action))}`:""}</div>`;
+    } else if(rec.kind === "否决"){
+      // 他否决掉的一条画像（真删；重立靠新印证，见 `weave.user_reject_profile`）
+      body = `<b class="drift">${t("否决画像")}</b> ${esc(rec.profile_id||"")}
+        <div class="why">${esc(rec.statement||"")}</div>
+        <div class="why">${esc(rec.status_before||"")} → ${esc(rec.outcome||"")}`
+        + `${rec.reason?`　·　${esc(rec.reason)}`:""}</div>`;
+    } else {
+      body = `<b class="drift">${esc(rec.kind || "?")}</b>
+        <div class="why">${esc(JSON.stringify(rec))}</div>`;
+    }
+    h += `<div class="row">${ts}${body}</div>`;
+  });
+  return h;
+}
+
+async function viewTopics(){
+  const d = await api("/api/topic-merge");
+  const list = d.suggestions || [];
+  if(!list.length) return `<div class="empty">${t("没有可疑的重复主题。")}</div>`;
+  return `
+  <div class="why" style="margin-bottom:10px">
+    ${t("系统不会自己合——只改归属、不删记录，会留痕。")}
+  </div>
+  <table><thead><tr><th>${t("并掉")}</th><th>${t("并入")}</th><th>${t("依据")}</th><th>${t("相似度")}</th><th></th></tr></thead><tbody>
+  ${list.map(x => `<tr>
+    <td>「${esc(x.from)}」<div class="why">${esc(x.from_sample||"—")} · ${t("{n} 条", {n: x.from_n})}</div></td>
+    <td>「${esc(x.to)}」<div class="why">${esc(x.to_sample||"—")} · ${t("{n} 条", {n: x.to_n})}</div></td>
+    <td>${esc(x.basis)}</td>
+    <td>${x.similarity}</td>
+    <td><button data-f="${esc(x.from)}" data-t="${esc(x.to)}"
+         onclick="doMerge(this.dataset.f,this.dataset.t)">${t("并入")}</button></td>
+  </tr>`).join("")}
+  </tbody></table>`;
+}
+async function doMerge(from,to){
+  if(!confirm(t("把「{from}」并入「{to}」？\n\n只改归属，不删记录，会留痕。", {from, to}))) return;
+  try{
+    const d = await api("/api/topic-merge", {method:"POST",
+      headers:{"Content-Type":"application/json"}, body: JSON.stringify({from, to})});
+    if(!d.ok){ alert(t("合并失败：") + (d.detail || "")); return; }
+    alert(t("已合并 {n} 条记录。", {n: d.merged}));
+    switchTab("主题");
+  }catch(e){ alert(t("合并失败：") + e.message); }
+}
+async function viewSettings(){
+  // 设置页要两包：配置 + 人格（后者 2026-10-05 加——列表 / 显示名 / 常驻块体量 /
+  // 新建模板都由后端给，页面一个数都不抄）
+  const [d, pd] = await Promise.all([api("/api/settings"), api("/api/persona")]);
+  const opt = Object.entries(d.presets||{}).map(([k,v]) => `<option value="${k}">${esc(v)}</option>`).join("");
+  // key 输入框**留空**是刻意的：以前把打码值回填进来，用户只改 endpoint
+  // 一点保存，那个打码串就被当成 key 存回了文件——之后每次请求都带着
+  // 一串掩码符号去鉴权，全部失败（真踩过）。
+  // 现在：空 = 这次不改，placeholder 显示打码值仅供辨认「配没配过」。
+  // 另外框子是 `type="password"`（2026-09-21）：**输入时自动打码**——
+  // 贴着屏幕输真 key，明文摆在那儿等于给截图和旁人看。
+  // hint：保存后 placeholder 会更新成新的打码值（头尾各留 4 位），用它核对有没有贴错。
+  const notes = [];
+  for(const [sec,tag] of [["llm","LLM"],["embedding",t("语义")]]){
+    for(const [name,env] of Object.entries(d[sec].from_env||{})){
+      notes.push(t("{tag}.{name} 正被环境变量 {env} 覆盖，改这里不生效", {tag, name, env}));
+    }
+    if(d[sec].key_looks_masked) notes.push(t("{tag} 的 key 是打码值，请重新填一次", {tag}));
+  }
+  const warn = notes.length
+    ? `<div class="why" style="color:var(--bad);margin-top:10px">⚠️ ${notes.map(esc).join("<br>")}</div>`
+    : "";
+  // 语言（中 / 英）：仪表盘与她的输出都跟着切。**切换即保存 + 刷新**——
+  // 界面文案在渲染时按 LANG 定，重载一遍最干净（也是唯一不用写两套渲染的路）。
+  const langSel = ["zh", "en"].map(v =>
+    `<option value="${v}"${LANG === v ? " selected" : ""}>${v === "zh" ? "中文" : "English"}</option>`).join("");
+  return `
+  <div class="grp" style="padding:0 0 8px">${t("{p} 怎么跟我说话")}</div>
+  <div class="grid2">
+    <label>${t("语言")}</label>
+    <div style="display:flex;gap:8px;align-items:center">
+      <select class="f" id="langSel" onchange="saveLang(this.value)">${langSel}</select>
+      <span class="why" style="margin:0">${t("仪表盘和 {p} 的输出都跟着切（页面会刷新一下）。")}</span>
+    </div>
+  </div>
+  <div class="why" style="margin-bottom:18px">
+    ${t("{p} 的声音在左侧「语音」页。")}
+  </div>
+
+  ${personaBlockHTML(pd)}
+
+  <div class="grp" style="padding:0 0 8px">${t("服务")}</div>
+  <div class="grid2">
+    <label>${t("预设")}</label>
+    <div style="display:flex;gap:8px">
+      <select class="f" id="preset">${opt}</select>
+      <button onclick="applyPreset()">${t("套用")}</button>
+    </div>
+    <label>LLM endpoint</label><input class="f" id="llm_ep" value="${esc(d.llm.endpoint)}">
+    <label>LLM model</label><input class="f" id="llm_md" value="${esc(d.llm.model)}">
+    <label>LLM key</label><input class="f" id="llm_key" type="password" autocomplete="new-password" value="" placeholder="${esc(d.llm.api_key||'sk-...')} ${t("— 留空表示不改")}">
+    <label>${t("语义 endpoint")}</label><input class="f" id="emb_ep" value="${esc(d.embedding.endpoint)}">
+    <label>${t("语义 model")}</label><input class="f" id="emb_md" value="${esc(d.embedding.model)}">
+    <label>${t("语义 key")}</label><input class="f" id="emb_key" type="password" autocomplete="new-password" value="" placeholder="${esc(d.embedding.api_key||t('（本地 Ollama 填 ollama）'))} ${t("— 留空表示不改")}">
+    <label>${t("语义证书校验")}</label>
+    <select class="f" id="emb_insecure">
+      <option value="0"${d.embedding.insecure_ssl ? "" : " selected"}>${t("校验（默认；公网端点别关）")}</option>
+      <option value="1"${d.embedding.insecure_ssl ? " selected" : ""}>${t("放宽（自签 / 内网端点才用）")}</option>
+    </select>
+    <label></label>
+    <div style="display:flex;gap:8px">
+      <button onclick="saveSettings()">${t("保存")}</button>
+      <button class="ghost" onclick="testConn('llm')">${t("测试 LLM")}</button>
+      <button class="ghost" onclick="testConn('embedding')">${t("测试语义")}</button>
+    </div>
+    <label>${t("结果")}</label><div id="testOut" class="why">—</div>
+  </div>
+  ${warn}
+  <div class="why" style="margin-top:14px">
+    ${t("优先级（低→高）：默认值 < AIR2_*（求知版遗留）< config.local.json < AIR_LINK_*。")}<br>
+    ${t("key 留空表示「不改动」，不会把已保存的 key 抹掉。")}<br>
+    ${t("这个文件已加进 .gitignore——key 不会进版本库。")}<br>
+    ${t("DeepSeek 不提供 embedding 接口；语义服务留空也能跑（降级成字符重叠，检索会变糙）。")}
+  </div>
+
+  <div class="grp" style="padding:0 0 8px">${t("退出")}</div>
+  <div class="why" style="margin-bottom:12px">
+    ${t("「全退出」= 先收掉语音服务（放掉显存），再关仪表盘自己——顺序反了就没人收那个进程了。")}<br>
+    ${t("下次双击 启动.vbs 就回来：它一起把语音服务也拉起来，而且不挂黑框。")}
+  </div>
+  <button class="ghost" onclick="quitApp()">${t("全退出")}</button>`;
+}
+
+/* ---------- 设置页「人格」块（2026-10-05）----------
+   人格文件（`self/personas/*.md`）的编辑器：列表 + 新建 + 编辑 + 停用 / 恢复。
+   **文件是真源**——这里只调后端那三个写口，不自己拼路径、不自己校验
+   （id 规则 / 上限 / 撞名都在 `core/persona.py`：两处各判一次必然漂）。
+   显示名（文件首行 `# xxx`）、字数、常驻块体量全部由 `/api/persona` 给，
+   页面不抄这些数（同「不抄后端常量」那条）。
+
+   体量的**实时预估**是线性的：人格正文原样拼进常驻块，所以
+   `新体量 = 旧体量 − 旧字数 + 新字数`——不必为每一次敲键盘去问后端。 */
+let P_META = {limit: 0, cur: null};     // 这一屏的数（编辑时算预估用）
+let P_TEMPLATE = "";                    // 新建的起步骨架（后端给）
+
+function personaBlockHTML(d){
+  P_META = {limit: d.limit || 0, cur: null};
+  P_TEMPLATE = d.template || "";
+  const rows = (d.items || []).map(it => {
+    const tags = [];
+    if(it.id === d.persona) tags.push(`<span class="tag ok">${t("在用")}</span>`);
+    if(it.builtin) tags.push(`<span class="tag">${t("内置")}</span>`);
+    if(!it.enabled) tags.push(`<span class="tag warn">${t("停用中")}</span>`);
+    const over = it.enabled && d.limit && it.fixed > d.limit;
+    // 停用的不算体量：它不占提示词（后端也不试算——`.off` 读出来是 air 的数，
+    // 摆出来比空着更容易看错）
+    const meta = it.enabled
+      ? `${it.chars} ${t("字")} · ${t("常驻块")} ${it.fixed || 0} / ${d.limit}`
+        + (over ? ` <span class="tag bad">${t("超了预算")}</span>` : "")
+      : t("（停用中，不占提示词）");
+    // `air` 没有「停用」：它是兜底——别人格文件缺失时靠它顶上
+    const btns = it.enabled
+      ? `<button class="ghost" onclick="pEdit('${esc(it.id)}')">${t("编辑")}</button>`
+        + (it.id === "air" ? ""
+           : `<button class="ghost" onclick="pToggle('${esc(it.id)}', false)">${t("停用")}</button>`)
+      : `<button class="ghost" onclick="pToggle('${esc(it.id)}', true)">${t("恢复")}</button>`;
+    return `<div class="pRow">
+      <span class="nm"><b>${esc(it.display)}</b>
+        <span class="why" style="display:inline">${esc(it.id)}</span></span>
+      <span class="meta">${meta} ${tags.join(" ")}</span>
+      <span style="display:flex;gap:6px">${btns}</span>
+    </div>`;
+  }).join("");
+  return `
+  <div class="grp" style="padding:0 0 8px">${t("人格")}</div>
+  <div class="why" style="margin:0 0 8px">${t("人格文件在 self/personas/ 下——她是谁，来这儿定。改完下一句就生效；记忆不跟着分家：换谁说话，看到的都是同一份记忆。")}</div>
+  <div id="pMsg" class="why" style="margin:0 0 6px"></div>
+  <div id="pList">${rows || `<div class="empty">${t("（空）")}</div>`}</div>
+  <div style="margin-top:10px"><button class="ghost" onclick="pNew()">${t("新建人格")}</button></div>
+  <div id="pEditor"></div>
+  <div style="height:18px"></div>`;
+}
+
+async function pEdit(id){
+  try{
+    const d = await api("/api/persona?id=" + encodeURIComponent(id));
+    const it = d.item || {};
+    P_META.cur = {chars: it.chars || 0, fixed: it.fixed || 0};
+    pOpenEditor({id, text: d.text || "", isNew: false});
+  }catch(e){ alert(t("读取失败：") + e.message); }
+}
+function pNew(){
+  P_META.cur = null;
+  pOpenEditor({id: "", text: P_TEMPLATE, isNew: true});
+}
+function pOpenEditor(o){
+  const box = $("pEditor");
+  box.classList.add("open");
+  box.innerHTML = `
+    <div class="why" style="margin:0 0 8px">${o.isNew
+      ? t("新建人格：id 只用小写英文 / 数字 / `_` / `-`（2–16 位）——它会写进对话原文的署名，中文和符号会让原文解析认不出人。")
+      : t("编辑「{name}」——整份文件都会原样给 {p} 看（章节名只是习惯，不是格式）。", {name: o.id})}</div>
+    ${o.isNew ? `<div class="grid2" style="margin-bottom:8px">
+      <label>id</label><input class="f" id="pId" placeholder="mo" spellcheck="false"></div>` : ""}
+    <textarea id="pText" spellcheck="false"></textarea>
+    <div style="display:flex;gap:8px;align-items:center;margin-top:8px">
+      <button class="primary" onclick="${o.isNew ? "pCreate()" : `pSave('${esc(o.id)}')`}">${t("保存")}</button>
+      <button class="ghost" onclick="pClose()">${t("取消")}</button>
+      <span id="pCount" class="why" style="margin:0"></span>
+    </div>`;
+  $("pText").value = o.text || "";
+  $("pText").addEventListener("input", pCount);
+  pCount();
+  box.scrollIntoView({block:"nearest"});
+}
+function pClose(){
+  const b = $("pEditor");
+  b.classList.remove("open");
+  b.innerHTML = "";
+  P_META.cur = null;
+}
+function pCount(){
+  const ta = $("pText");
+  if(!ta) return;
+  const n = ta.value.trim().length;
+  let s = t("字数 {n}", {n});
+  if(P_META.cur){
+    const est = Math.max(0, P_META.cur.fixed - P_META.cur.chars + n);
+    s += " · " + t("常驻块约 {a} / {b}", {a: est, b: P_META.limit});
+    if(P_META.limit && est > P_META.limit) s += " ⚠️ " + t("超了预算");
+  } else if(P_META.limit){
+    s += " · " + t("常驻块预算上限 {b}（新建后计入）", {b: P_META.limit});
+  }
+  const el = $("pCount");
+  if(el) el.textContent = s;
+}
+async function pSave(id){
+  try{
+    const d = await api("/api/persona-save", {method:"POST",
+      headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({id, text: $("pText").value})});
+    if(!d.ok){ alert(d.detail || t("保存失败")); return; }
+    await pAfter(d.changed ? t("已保存「{name}」——下一句起就用新的。", {name: id}) : t("没改动。"));
+  }catch(e){ alert(t("保存失败：") + e.message); }
+}
+async function pCreate(){
+  const idEl = $("pId");
+  const id = idEl ? idEl.value.trim() : "";
+  try{
+    const d = await api("/api/persona-create", {method:"POST",
+      headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({id, text: $("pText").value})});
+    if(!d.ok){ alert(d.detail || t("保存失败")); return; }
+    await pAfter(t("建好了「{name}」——想用就在顶栏「和谁聊」里切过去。",
+                   {name: (d.item || {}).id || id}));
+  }catch(e){ alert(t("保存失败：") + e.message); }
+}
+async function pToggle(id, on){
+  if(!confirm(on ? t("恢复「{name}」？", {name: id})
+                 : t("停用「{name}」？文件会改名成 .md.off——不删，随时能恢复。", {name: id}))) return;
+  try{
+    const d = await api("/api/persona-enable", {method:"POST",
+      headers:{"Content-Type":"application/json"}, body: JSON.stringify({id, on})});
+    if(!d.ok){ alert(d.detail || t("保存失败")); return; }
+    await pAfter(d.switched_to
+      ? t("已停用「{name}」——正在用的就是它，已切回 {p}。", {name: id}) : "");
+  }catch(e){ alert(t("保存失败：") + e.message); }
+}
+/* 写完之后：顶栏（名单 / 显示名 / 当前人格）与这一屏一起刷。
+   顺序是有意的——`loadPersona` 先走（`{p}` 的取值跟着它），再刷静态文案，
+   最后重渲染面板（新节点挂上去之后才写 #pMsg）。 */
+async function pAfter(msg){
+  await loadPersona();
+  paintStatic();
+  await refreshPanel();
+  const el = $("pMsg");
+  if(el && msg) el.textContent = msg;
+}
+
+/* ---------- 语音（独立一页）----------
+   三块：服务（起 / 关 + 状态）、声音模型（`tts/voice.json` 的白名单字段）、
+   说话的声音（基底音色 + 微调刻度 + 音色描述，走 `user_prefs`，下一句生效）。
+   「换模型要重启服务」是这一页唯一的重操作——所以配了一个「保存并重启」。
+
+   这一页的规矩：**凡是"有哪些选项"，一律从服务那边拿，页面不抄一份**
+   （音色清单、刻度定义都是）。抄了就是两边各自漂移的开始——今天加一个维度，
+   页面显示不出来，看着像"服务坏了"。 */
+
+// 音色清单与刻度定义：`viewVoice` 渲染时从 `/health` 填进来。
+// 放在全局是因为下拉要能**原地重排**（勾「显示全部」时重建 options，不重刷整页）。
+let VOICE_SPK = {base: [], all: [], svc: "", now: ""};
+let VOICE_DIMS = {};
+let voiceShowAll = false;
+
+/* 小写去重；并把**当前在用的那个补在最前面**——它若正好落在被挡的名单上，
+   不放进来下拉就会显示成"跟随语音服务"，看着像他的设置丢了。 */
+function meritSpk(list, keep){
+  const out = [], seen = new Set();
+  const add = (x) => {
+    const s = String(x || "").trim();
+    if(!s || seen.has(s.toLowerCase())) return;
+    seen.add(s.toLowerCase()); out.push(s);
+  };
+  add(keep);
+  (list || []).forEach(add);
+  return out;
+}
+function speakerOpts(){
+  const list = voiceShowAll ? VOICE_SPK.all : VOICE_SPK.base;
+  const now = (VOICE_SPK.now || "").toLowerCase();
+  return [`<option value="">${t("跟随语音服务（{svc}）", {svc: esc(VOICE_SPK.svc || t("默认"))})}</option>`]
+    .concat(list.map(x => `<option value="${esc(x)}"${x.toLowerCase() === now ? " selected" : ""}>${esc(x)}</option>`))
+    .join("");
+}
+function toggleVoiceShowAll(){
+  voiceShowAll = !!($("voiceShowAll") || {}).checked;
+  const sel = $("voiceSpeaker");
+  if(!sel) return;
+  const keep = sel.value;                      // 重排不能把他刚选的那个丢了
+  sel.innerHTML = speakerOpts();
+  sel.value = kept(keep, sel) ? keep : "";
+}
+/* `<select>` 换了一批 options 之后，`value=` 赋进去的值如果不在新表里会被静默改成 ""——
+   那是"我选了，但它悄悄跳回默认"的经典样子。所以先确认它在，不在才认 ""。 */
+function kept(v, sel){
+  return Array.from(sel.options).some(o => o.value === v);
+}
+/* 滑块拖动时把当前那档的**中文描述**显示出来——数字没意义，"偏低沉"才有。 */
+function dimShow(k){
+  const spec = VOICE_DIMS[k];
+  const el = $("vd_" + k), txt = $("vdt_" + k);
+  if(!spec || !el || !txt) return;
+  const opts = spec[1] || [];
+  txt.textContent = t(opts[parseInt(el.value, 10)] || "默认");
+}
+/* 表单现在的值 → 一次请求要的形状。**一处收集，保存和试听共用**
+   （两边各读一遍输入框的下场：某天加了一个字段，只有一边带上）。 */
+function readVoiceForm(){
+  const dims = {};
+  Object.keys(VOICE_DIMS).forEach(k => {
+    const el = $("vd_" + k);
+    if(el) dims[k] = parseInt(el.value, 10);
+  });
+  return {speaker: (($("voiceSpeaker") || {}).value || ""), dims,
+          extra: (($("voiceExtra") || {}).value || "")};
+}
+function resetVoiceDims(){
+  Object.keys(VOICE_DIMS).forEach(k => {
+    const el = $("vd_" + k);
+    if(el) el.value = String((VOICE_DIMS[k] || [])[2] ?? 2);
+    dimShow(k);
+  });
+  const out = $("voiceOut");
+  if(out) out.textContent = t("刻度已调回默认（还没保存）");
+}
+/* 模型候选：点一下填进输入框（输入框本身保留——也能手写 HF 仓库名）。 */
+function fillModel(v){
+  const el = $("vm_model");
+  if(el) el.value = v;
+}
+/* 参考音频候选：同样点一下填入（refs/ 下的文件列表）。 */
+function fillRef(v){
+  const el = $("vm_ref_audio");
+  if(el) el.value = v;
+}
+async function viewVoice(){
+  const [v, c] = await Promise.all([api("/api/voice"), api("/api/voice/config")]);
+  const st = v.status || {ok:false};
+  const cur = v.voice || {};
+  // 音色选项：**从服务来**（模型自己报的），页面里不抄一份——抄了会和模型漂移。
+  // 两份清单：`base` 是过滤后（`voice.json` 点名挡掉的方言 / 外语不在里头），
+  // `all` 是全表——平时用前者，勾了「显示全部」才给后者。挡掉 ≠ 删掉。
+  VOICE_SPK = {
+    // 当前存的那个音色**一定得在选项里**（哪怕它正好在被挡的名单上：那说明他当初
+    // 就要它，界面不能悄悄把它换掉——下拉会显示成"跟随语音服务"，看着像设置丢了）
+    base: meritSpk((st.speakers || []), cur.speaker),
+    all:  meritSpk((st.speakers_all || st.speakers || []), cur.speaker),
+    svc:  st.speaker || "",
+    now:  cur.speaker || "",
+  };
+  VOICE_DIMS = st.dims || {};        // 维度定义也从服务来（`tts/server.py` 的 VOICE_DIMS）
+  const extraVal = (cur.instruct_extra == null) ? "" : cur.instruct_extra;
+  // 刻度只渲染**服务认得的那些维度**：维度表将来增删，页面跟着走，不用改这里。
+  const dimRows = Object.keys(VOICE_DIMS).map(k => {
+    const [lab, opts, dflt, maxv] = VOICE_DIMS[k] || ["", [], 2, 4];
+    const val = (cur.dims && cur.dims[k] !== undefined) ? cur.dims[k] : dflt;
+    return `
+    <label>${esc(lab)}</label>
+    <div style="display:flex;gap:10px;align-items:center">
+      <input type="range" id="vd_${esc(k)}" min="0" max="${esc(String(maxv))}" step="1"
+             value="${esc(String(val))}" style="flex:1;padding:0" oninput="dimShow('${esc(k)}')">
+      <span class="why" id="vdt_${esc(k)}"
+            style="margin:0;min-width:13em;text-align:right">${esc(t(opts[val] || "默认"))}</span>
+    </div>`;
+  }).join("");
+  const cfg = (c && c.config) || {};
+  const models = (c && c.models) || [];
+  const modelOpts = models.map(m => `<option value="${esc(m)}"></option>`).join("");
+  // 模型候选的**可见按钮**（点一下填进输入框）——datalist 只在聚焦时才现身，
+  // "有什么可选"不该藏在一次点击后面（看不到 = 像没做过）。
+  const modelBtns = models.map(m => {
+    const short = String(m).split("/").pop().replace(/^Qwen3-TTS-12Hz-/, "");
+    const tag = /-Base$/.test(m) ? t("（克隆）") : "";
+    return `<button class="ghost" style="padding:2px 10px;font-size:12px"
+      onclick="fillModel('${esc(m)}')">${esc(short)}${tag}</button>`;
+  }).join("");
+  // 现在跑的是哪条生成路（`/health` 经 `/api/voice` 透传）：克隆 / 预设音色 / GGUF。
+  const kind = st.model_kind || "";
+  let modeHint;
+  if(!st.ok){
+    modeHint = t("语音服务没起——起来后这里显示当前模式。");
+  } else if(kind === "base"){
+    modeHint = st.ref_anchor
+      ? t("现在：克隆模式——{p} 用参考音频（{ref}）的声音说话。", {ref: st.ref_anchor})
+      : t("现在：克隆模式，但参考音频没配上（voice.json 的 ref_audio）——播报会报错。");
+  } else if(kind === "gguf"){
+    modeHint = t("现在：GGUF 模型——这台 Windows 跑不了，请切回 torch 版。");
+  } else {
+    modeHint = t("现在：预设音色——在下面「说话的声音」里挑基底音色。");
+  }
+  // 文件里写的 vs 服务里跑的：不一样 = 改过了但还没重启（省得他对着两个值发懵）
+  const pending = (st.ok && cfg.model && st.model && cfg.model !== st.model)
+    ? ` <b>${t("（改过了，重启后生效）")}</b>` : "";
+  // 参考音频（克隆用）：候选来自 refs/（主项目扫目录给的，同模型列表一条路）
+  const refs = (c && c.refs) || [];
+  const refOpts = refs.map(r => `<option value="${esc(r)}"></option>`).join("");
+  const refBtns = refs.map(r => {
+    const short = String(r).split("/").pop();
+    return `<button class="ghost" style="padding:2px 10px;font-size:12px"
+      onclick="fillRef('${esc(r)}')">${esc(short)}</button>`;
+  }).join("");
+  const dtypes = ["bfloat16","float16","float32"];
+  const langs = [...new Set([cfg.language, "Chinese","English","Japanese","Korean"].filter(Boolean))];
+  return `
+  <div class="grp" style="padding:0 0 8px">${t("语音服务")}</div>
+  <div class="why" style="margin-bottom:10px">
+    ${t("起 / 关都在顶栏那颗「语音」按钮上（关 = 放显存）。模型到第一次播报才读——要等十几秒。")}
+  </div>
+  <div class="grid2">
+    <label>${t("状态")}</label>
+    <div class="why" style="margin:0"><span id="voiceLine">${esc(voiceLine(st))}</span></div>
+  </div>
+
+  <div class="grp" style="padding:16px 0 8px">${t("声音模型")}</div>
+  <div class="why" style="margin-bottom:10px">
+    ${t("改的是 tts/voice.json——保存后要点「保存并重启」才生效。")}
+  </div>
+  <div class="grid2">
+    <label>${t("模型")}</label>
+    <div>
+      <input class="f" id="vm_model" list="vmModels" value="${esc(cfg.model || "")}" style="width:100%;box-sizing:border-box">
+      <datalist id="vmModels">${modelOpts}</datalist>
+      <div class="why" style="margin:6px 0 4px">${t("点一下填入（也可以自己写 HF 仓库名）：")}</div>
+      <div style="display:flex;gap:6px;flex-wrap:wrap">${modelBtns}</div>
+      <div class="why" style="margin:8px 0 0">${modeHint}${pending}</div>
+    </div>
+    <label>${t("精度")}</label>
+    <select class="f" id="vm_dtype">${dtypes.map(x => `<option value="${x}"${x === cfg.dtype ? " selected" : ""}>${x}</option>`).join("")}</select>
+    <label>${t("设备")}</label>
+    <input class="f" id="vm_device" list="vmDevices" value="${esc(cfg.device || "cuda:0")}">
+    <datalist id="vmDevices"><option value="cuda:0"></option><option value="cpu"></option></datalist>
+    <label>${t("语言")}</label>
+    <input class="f" id="vm_language" list="vmLangs" value="${esc(cfg.language || "Chinese")}">
+    <datalist id="vmLangs">${langs.map(x => `<option value="${esc(x)}"></option>`).join("")}</datalist>
+    <label>${t("空闲卸载")}</label>
+    <div style="display:flex;gap:8px;align-items:center">
+      <input class="f" id="vm_idle" type="number" min="0" max="1440" style="width:110px"
+             value="${esc(cfg.idle_unload_minutes ?? 10)}">
+      <span class="why" style="margin:0">${t("分钟没念就放掉显存（0 = 一直占着）")}</span>
+    </div>
+    <label>${t("参考音频")}</label>
+    <div>
+      <input class="f" id="vm_ref_audio" list="vmRefs" value="${esc(cfg.ref_audio || "")}"
+             style="width:100%;box-sizing:border-box" placeholder="refs/xxx.wav">
+      <datalist id="vmRefs">${refOpts}</datalist>
+      <div class="why" style="margin:6px 0 4px">${t("克隆模式的声音来源——把录音放进 refs/ 再点一下填入（wav 最稳）：")}</div>
+      <div style="display:flex;gap:6px;flex-wrap:wrap">${refBtns}</div>
+    </div>
+    <label>${t("参考文本")}</label>
+    <div>
+      <input class="f" id="vm_ref_text" value="${esc(cfg.ref_text || "")}" style="width:100%;box-sizing:border-box">
+      <div class="why" style="margin:6px 0 0">${t("那段录音逐字说了什么——要和录音一字不差（差得多，克隆会走样）。")}</div>
+    </div>
+    <label></label>
+    <div style="display:flex;gap:8px;align-items:center">
+      <button onclick="saveVoiceModel()">${t("保存")}</button>
+      <button class="ghost" onclick="restartVoice()">${t("保存并重启语音服务")}</button>
+      <span id="vmOut" class="why">—</span>
+    </div>
+  </div>
+
+  <div class="grp" style="padding:16px 0 8px">${t("说话的声音")}</div>
+  <div class="why" style="margin-bottom:10px">
+    ${t("这里是同一个模型下 {p} 的嗓子：改完下一句就生效，不用重启。")}<br>
+    ${t("基底音色是换一个人（挑好一个就不动它），下面那些刻度是同一个人换种说法——微调在刻度上做。")}
+    ${st.ok && kind === "base" ? `<br><b>${t("当前是克隆模式：声音来自参考音频——「基底音色」选谁都不影响；「刻度」与「音色描述」会作为语气指令生效（能调快慢/情绪/语气，换不了音色本身）。")}</b>` : ""}
+  </div>
+  <div class="grid2">
+    <label>${t("基底音色")}</label>
+    <div style="display:flex;gap:10px;align-items:center">
+      <select class="f" id="voiceSpeaker">${speakerOpts()}</select>
+      <label class="why" style="margin:0;display:flex;gap:5px;align-items:center;white-space:nowrap">
+        <input type="checkbox" id="voiceShowAll"${voiceShowAll ? " checked" : ""}
+               onchange="toggleVoiceShowAll()">${t("显示全部")}
+      </label>
+    </div>
+    ${dimRows || `<label></label><div class="why" style="margin:0">${t("微调刻度要从服务那边拿——先起来（顶栏「语音」）才能调。")}</div>`}
+    <label>${t("音色描述")}</label>
+    <input class="f" id="voiceExtra" value="${esc(extraVal)}" placeholder="${esc(st.instruct_extra || t("跟随 voice.json"))}">
+    <label></label>
+    <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+      <button onclick="saveVoice()">${t("保存")}</button>
+      <button class="ghost" onclick="resetVoiceDims()">${t("刻度调回默认")}</button>
+      <button class="ghost" onclick="tryVoice()">${t("试听")}</button>
+      <span id="voiceOut" class="why">—</span>
+    </div>
+  </div>
+  <div class="why" style="margin:12px 0 0">
+    ${t("没调过的刻度不进指令；音色描述想写什么写什么（\"带一点鼻音\"\"像刚睡醒\"）。")}<br>
+    ${t("方言和外语那几个默认不出现，勾「显示全部」可以选回来。")}${st.ok ? "" : t("（服务没起也能改，起来就生效。）")}
+  </div>`;
+}
+
+async function saveVoiceModel(){
+  const out = $("vmOut");
+  const cfg = {model: $("vm_model").value, dtype: $("vm_dtype").value,
+              device: $("vm_device").value, language: $("vm_language").value,
+              idle_unload_minutes: parseInt($("vm_idle").value, 10) || 0};
+  const refA = $("vm_ref_audio"), refT = $("vm_ref_text");
+  if(refA) cfg.ref_audio = refA.value;      // 克隆参考（Base 模型用；空值 = 这次不改）
+  if(refT) cfg.ref_text = refT.value;
+  try{
+    const d = await api("/api/voice/config", {method:"POST",
+      headers:{"Content-Type":"application/json"}, body: JSON.stringify({config: cfg})});
+    if(!d.ok) throw new Error(d.detail || t("保存失败："));
+    const n = Object.keys(d.changed || {}).length;
+    out.textContent = n ? t("已保存——重启语音服务后生效。") : t("没有变化。");
+    return true;
+  }catch(e){ out.textContent = t("保存失败：") + e.message; return false; }
+}
+
+/* 保存并重启：**换模型的完整动作**。重启只关 / 起服务，不预加载——
+   所以几秒回来；新权重到第一次播报才读（跟第一次用一样）。 */
+async function restartVoice(){
+  const out = $("vmOut");
+  out.textContent = t("正在保存…");
+  if(!(await saveVoiceModel())) return;
+  out.textContent = t("正在重启语音服务（先关、再起）…");
+  try{
+    await api("/api/voice/stop", {method:"POST", headers:{"Content-Type":"application/json"}, body:"{}"});
+    out.textContent = t("旧的已关掉，正在起新的…");
+    const d = await api("/api/voice/start", {method:"POST", headers:{"Content-Type":"application/json"}, body:"{}"});
+    if(!d.ok) throw new Error(d.detail || t("起不来"));
+    out.textContent = t("重启好了——新配置已生效（权重第一次播报时才读）。");
+    const st = await api("/api/voice");
+    const line = $("voiceLine");
+    if(line) line.textContent = voiceLine(st.status);
+  }catch(e){ out.textContent = t("重启失败：") + e.message; }
+  refreshVoicePower();
+}
+
+async function saveLang(v){
+  // 切换语言：存进后端 `user_prefs.lang`，然后**整页重载**——
+  // 文案在渲染那一刻就按 LANG 定了，重载是唯一不用维护两套渲染的切法。
+  const sel = $("langSel");
+  if(sel) sel.disabled = true;
+  try{
+    await api("/api/lang", {method:"POST", headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({lang: v})});
+    location.reload();
+  }catch(e){
+    alert(t("切换语言失败：") + e.message);
+    if(sel) sel.disabled = false;
+  }
+}
+async function saveSettings(){
+  // key 留空 → 传空串 → 后端 `save_local()` 认作「这次没改」，保留原 key。
+  // 关键是**绝不回填打码值**：那等于用一串圆点覆盖真 key。
+  const cfg = {
+    llm: {endpoint:$("llm_ep").value.trim(), model:$("llm_md").value.trim(), api_key:$("llm_key").value.trim()},
+    // `insecure_ssl` 显式带上：界面给了这个开关，保存就该由它说了算
+    //（后端有合并兜底——手写文件里的键不会被一次保存抹掉）
+    embedding: {endpoint:$("emb_ep").value.trim(), model:$("emb_md").value.trim(),
+                api_key:$("emb_key").value.trim(),
+                insecure_ssl: $("emb_insecure").value === "1"}
+  };
+  try{
+    await api("/api/settings", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({config:cfg})});
+    $("testOut").textContent = t("已保存，客户端已重建。");
+    refreshHeader();
+  }catch(e){ $("testOut").textContent = t("保存失败：") + e.message; }
+}
+/* 服务状态那一行的文案：**一处写、多处用**（渲染时一次；重启服务后原地更新一次）。 */
+function voiceLine(st){
+  if(!st || !st.ok) return t("没接上（{why}）", {why: (st && st.detail) || t("服务没起")});
+  // 加载着的时候顺带说清"它凭什么还占着显存"：空闲多久了、还有多久自己放掉。
+  let idle = "";
+  if(st.loaded && st.idle_unload_minutes > 0){
+    const used = (st.idle_seconds || 0) / 60;
+    idle = t("（空闲 {a} 分钟，{b} 分钟后自动放掉显存）",
+             {a: Math.floor(used), b: Math.max(0, Math.ceil(st.idle_unload_minutes - used))});
+  }
+  return t("已接上 · 模型 {m} · ", {m: st.model || "?"})
+       + (st.loaded ? t("已加载") + idle : t("还没加载（第一次播报要等十几秒）"))
+       + t(" · 服务当前音色 {v}", {v: st.speaker || "?"});
+}
+
+/* 全退出：**先收外挂，再关自己**（顺序在服务端保证，见 /api/quit）——
+   仪表盘一没，就没人去收那个吃显存的进程了。 */
+async function quitApp(){
+  if(!confirm(t("全退出？\n\n会关掉语音服务（放掉显存）和仪表盘本身。\n下次双击「启动.vbs」就回来。"))) return;
+  const out = $("voiceOut");
+  if(out) out.textContent = t("正在退出…");
+  try{
+    await api("/api/quit", {method:"POST", headers:{"Content-Type":"application/json"}, body:"{}"});
+  }catch(e){
+    // 它退的时候这条连接会断——那正是"它乖乖退了"的动静，不是错误
+  }
+  document.body.innerHTML = '<div style="padding:70px 20px;text-align:center;opacity:.8">'
+    + `<p style="font-size:16px;margin-bottom:10px">${t("已退出。")}</p>`
+    + `<p class="why" style="margin:0">${t("语音服务（含显存）也收干净了。这个页面可以关掉；下次双击「启动.vbs」就回来。")}</p></div>`;
+}
+
+async function saveVoice(){
+  const f = readVoiceForm();
+  try{
+    await api("/api/voice", {method:"POST", headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({speaker: f.speaker, dims: f.dims, instruct_extra: f.extra})});
+    VOICE_SPK.now = f.speaker;      // 存下了，它就是"当前那个"（重排时别把它弄丢）
+    $("voiceOut").textContent = t("已保存，下一句就生效。");
+  }catch(e){ $("voiceOut").textContent = t("保存失败：") + e.message; }
+}
+
+/* 试听：**用表单里当前的值**（没保存也能先听），念一句固定的样句。
+   为什么固定样句：定音色要听的是"这个嗓子念这话什么动静"，不是听内容——
+   内容一样，才比得出来。样句跟着界面语言走（英文模式听英文）。 */
+function voiceSample(){
+  return LANG === "en"
+    ? "Hey, I'm here. How was your day? Take your time with that thing earlier — I'm listening."
+    : "嗯，我在。今天过得怎么样？刚才那件事你慢慢说，我听着。";
+}
+async function tryVoice(){
+  // 用**表单里当前的值**（还没保存也能先听）——这是"拖一拖听听什么动静"的唯一办法
+  const f = readVoiceForm();
+  const out = $("voiceOut");
+  const show = (msg) => { if(out) out.textContent = msg; };
+  stopSpeak();                       // 试听不叠在正在念的那条上
+  show(t("试听中…"));
+  const got = await speakStreaming(null, voiceSample(), {speaker: f.speaker, dims: f.dims,
+                                                         instruct_extra: f.extra});
+  if(got.ok){ show(t("在放了（这一段就是 {p} 接下来每句的嗓子）")); return; }
+  if(got.error){ show(t("放不出来：") + got.error); return; }
+  try{                               // 流式这条路用不了：退回整段（同 speak 那条退路）
+    const d = await api("/api/speak", {method:"POST", headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({text: voiceSample(),
+                            speaker: f.speaker, dims: f.dims, instruct_extra: f.extra})});
+    if(!d.ok){ show(t("放不出来：") + (d.detail || t("没接上语音服务"))); return; }
+    const a = new Audio(d.audio);
+    speakAudio = a;
+    a.onended = a.onerror = () => stopSpeak();
+    await a.play();
+    show(t("在放了（这一段就是 {p} 接下来每句的嗓子）"));
+  }catch(e){ show(t("放不出来：") + e.message); }
+}
+
+async function applyPreset(){
+  try{
+    await api("/api/settings/preset", {method:"POST", headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({name: $("preset").value})});
+    switchTab("设置");
+  }catch(e){ $("testOut").textContent = t("套用失败：") + e.message; }
+}
+async function testConn(sec){
+  $("testOut").textContent = t("测试中…");
+  try{
+    const d = await api("/api/settings/test", {method:"POST", headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({section: sec})});
+    $("testOut").innerHTML = (d.ok ? `<span style="color:var(--ok)">✓ </span>` : `<span style="color:var(--bad)">✗ </span>`) + esc(d.detail);
+  }catch(e){ $("testOut").textContent = t("测试失败：") + e.message; }
+}
+
+/* ---------- 头部 ---------- */
+let distillTimer = 0;
+// 整理期间自动轮询：整理完要自己刷新一下，否则「整理中…」会一直挂着，
+// 用户会以为卡住了，然后反复点「新对话」（越点越乱）。
+function watchDistill(on){
+  if(on && !distillTimer) distillTimer = setInterval(refreshAll, 2500);
+  if(!on && distillTimer){ clearInterval(distillTimer); distillTimer = 0; }
+}
+/* 外部服务灯的判据（2026-09-25）：**看真实的最后一次调用**，不看"配了没有"——
+   原来只判配置，向量服务死了两天勾还亮着（后端 `_service_status` 的理由）。
+   四态：**未配**（没填齐）/ **未测试**（填齐了但一次都没调用过——完全中性：
+   既不说能用，也不说不能用）/ **✓**（最近一次成功）/ **✗**（最近一次失败，
+   红，悬停给时间与原因）。 */
+/* 只列后端真会记的码：`_note_err` 对 HTTP 只按状态码分档、**不读响应体**
+   （体是一次性的，读了降级判据就瞎了）——所以没有 `too_long` 那种要读体才有的码 */
+const SVC_ERR = {auth:"key 不对（401）", rate:"被限流（429）",
+                 timeout:"超时", network:"连不上", other:"失败"};
+function svcErrText(code){
+  if(!code) return "";
+  if(SVC_ERR[code]) return t(SVC_ERR[code]);
+  // 语义服务存的是异常原文（"连不上 / 超时"那类话就写在里面）——截断原样给
+  return /^http_/.test(code) ? ("HTTP " + code.slice(5)) : code.slice(0, 60);
+}
+function svcPill(el, name, st){
+  st = st || {};
+  let cls = "on", text = t(name + " ✓"), tip = "";
+  if(!st.available){
+    cls = "off"; text = t(name + " 未配");
+  }else if(st.ok === false){
+    cls = "bad"; text = t(name + " ✗");
+    tip = t("最近失败 {t}（{e}）",
+            {t: (st.last_err_at || "").slice(5, 16),
+             e: svcErrText(st.last_error) || t("失败")});
+  }else if(st.ok === null){
+    cls = "off"; text = t(name + " 未测试");
+    tip = t("还没调用过——配置在，第一次对话就会验证它");
+  }else{
+    tip = t("最近成功 {t}", {t: (st.last_ok_at || "").slice(5, 16)});
+  }
+  el.textContent = text;
+  el.className = "pill " + cls;
+  el.title = tip;
+}
+async function refreshHeader(){
+  try{
+    const s = await api("/api/state");
+    // 拖入的上限从 config 来（`/api/state` 带过来），页面里不抄一份
+    INPUT_MAX = (s.input && s.input.file_max_chars) || INPUT_MAX;
+    LONG_CHARS = (s.input && s.input.long_chars) || LONG_CHARS;
+    const c = s.counts;
+    $("hCounts").innerHTML =
+      t("场景 <b>{n}</b> · 原文 <b>{d}</b> 天 · 摘要 <b>{s}</b> · 画像 <b>{p}</b> · 备忘录 <b>{o}</b> · 实体 <b>{e}</b>",
+        {n: c.scenes, d: c.raw_docs, s: c.summaries, p: c.profiles, o: c.memos, e: c.entities})
+      + (c.archived ? t(" · 冷层 <b>{n}</b>", {n: c.archived}) : "");
+    // 两个服务灯：判据是后端记的**真实调用结果**（`_service_status`），
+    // 不是"配置填了没有"——服务死了两天勾还亮着的教训（2026-09-25）
+    svcPill($("hVec"), "语义", s.vector);
+    svcPill($("hLLM"), "模型", s.llm);
+    const hd = $("hDistill");
+    hd.style.display = s.distilling ? "" : "none";
+    hd.textContent = t("整理中…");
+    hd.className = "pill on";
+    watchDistill(s.distilling);
+    // 「air 这轮看到的短期窗口」——唤醒面板里显示（数据在 `/api/state` 里，
+    // 以前没人读它；窗口渲染的开销很小，而它是"air 上下文里有什么"的另一半答案）
+    const wwin = $("wakeWindow");
+    if(wwin){
+      const w = (s.window || "").trim();
+      wwin.style.display = w ? "" : "none";
+      wwin.innerHTML = w
+        ? `<div class="why">${t("{p} 这轮看到的短期窗口（〔更早〕+〔最近〕）：")}</div><pre>${esc(w)}</pre>`
+        : "";
+    }
+  }catch(e){ $("hCounts").textContent = t("状态读取失败：") + e.message; }
+}
+function refreshAll(){ refreshHeader(); refreshPanel(); refreshMemos(); }
+
+/* ---------- 备忘录（对话右侧，随手划） ---------- */
+// 2026-09-21（设计稿 D 条 4）：她判（`close_memo` 工具）+ 他随手划（这里），
+// 系统兜底（**超期退役**，2026-10-05 起）。面板常驻右列（histAside）顶部——**默认收起只占一行**，
+// 点开是全列（不只列到期的），每条一个「划掉」。
+// 窄屏没有右列：面板随 histAside 一起不可见（同右列的其它内容，见 loadHistory）。
+let memoPanel = null;      // 面板元素（clearChat 会清空 histAside——靠引用重挂）
+let memosOpen = false;     // 展开态（不持久化：刷新回默认，同 asideBtn 的规矩）
+let memoData = [];         // 最近一次拉到的全列（划掉后用后端回的列表覆盖）
+
+function mountMemoPanel(){
+  if(!memoPanel){
+    memoPanel = document.createElement("div");
+    memoPanel.id = "memoSec";
+    memoPanel.innerHTML = `<div class="mh" onclick="toggleMemos()">`
+      + `<span id="memoHead"></span><span class="chev">▼</span></div>`
+      + `<div class="mb" id="memoBody"></div>`;
+  }
+  // 总是挂回顶部：clearChat 清过 histAside，节点要靠引用重挂。
+  // 「收起右列」不动它——收起就是收起，右列内容留在右列（见 toggleAside）。
+  const aside = $("histAside");
+  if(memoPanel.parentNode !== aside) aside.insertBefore(memoPanel, aside.firstChild);
+}
+/* 把备忘录按组聚拢（2026-09-22）：同组名的挨在一起、保持原顺序；
+   没组名的各自成组（name 为空 → 不渲染组头）。 */
+function memoGroups(list){
+  const groups = [], byName = {};
+  (list||[]).forEach(m => {
+    const g = (m.group_name || "").trim();
+    const key = g || `__${m.id}`;            // 无组名：各自一组
+    if(!byName[key]){ byName[key] = {name: g, items: []}; groups.push(byName[key]); }
+    byName[key].items.push(m);
+  });
+  return groups;
+}
+function toggleMemos(){ memosOpen = !memosOpen; renderMemoPanel(); }
+function renderMemoPanel(){
+  if(!memoPanel) return;
+  // 0 条：整块摘掉（不占地方，也保住 `#histAside:empty` 的旧语义——
+  // 没有历史也没有备忘录时，右列照旧整个不显示）
+  if(!memoData.length){ memoPanel.remove(); return; }
+  mountMemoPanel();          // 挂在最前（重挂是幂等的）
+  memoPanel.classList.toggle("open", memosOpen);
+  $("memoHead").textContent = memosOpen
+    ? t("备忘录 · {n} 件（点收起）", {n: memoData.length})
+    : t("备忘录 · {n} 件（点开划掉）", {n: memoData.length});
+  if(!memosOpen) return;
+  const kindZh = {"user_task": t("用户说的事"), "air_promise": t("你答应的事")};
+  // 按组渲染（2026-09-22）：同一件事的多步挂在一个组头下、步骤缩进一层；
+  // 划掉仍是划单条——**「哪个了结划掉哪个」**（组只用于聚合显示）。
+  $("memoBody").innerHTML = memoGroups(memoData).map(grp => {
+    const rows = grp.items.map(m => {
+      const due = m.due_now ? ` <span class="due">· ${t("到期")}</span>` : "";
+      return `<div class="mi${grp.name?" sub":""}"><div class="mx">`
+        + `<span class="mid">${esc(m.id)}</span>${esc(kindZh[m.kind] || "")}${due}<br>${esc(m.content)}`
+        + `</div><button class="ghost" onclick="closeMemo('${esc(m.id)}')">${t("划掉")}</button></div>`;
+    }).join("");
+    const head = grp.name
+      ? `<div class="mg">${esc(grp.name)}　·　${t("{n} 步", {n: grp.items.length})}</div>` : "";
+    return head + rows;
+  }).join("");
+}
+async function refreshMemos(){
+  try{
+    memoData = (await api("/api/memos")) || [];
+    mountMemoPanel();
+    renderMemoPanel();
+  }catch(e){ /* 面板读不到不该拦界面 */ }
+}
+async function closeMemo(id){
+  try{
+    const out = await api("/api/memo-close", {method:"POST",
+      headers:{"Content-Type":"application/json"}, body: JSON.stringify({id})});
+    if(out.memos) memoData = out.memos;     // 后端回的是刷新后的全列
+    if(!out.ok) alert(t("划不掉：") + (out.detail || ""));
+    renderMemoPanel();
+    // 左侧「备忘录」页开着就一起刷（同一个人发动作的第三个入口：右侧面板 / 左侧表格 / 她调工具）
+    if(activeTab === "备忘录") refreshPanel();
+  }catch(e){ alert(t("划不掉：") + e.message); }
+}
+
+/* ---------- 拖入文件（**人拉进来的**，不是 air 去读的） ---------- */
+// 设计稿：工具箱第十二节。**读文件的是浏览器，不是 air**——air 收到的永远只是一条
+// 普通消息，甚至不知道这段是文件还是打字。
+// 三个"不"：不自动发送、不加标注前缀、不走特殊通道。
+
+// 上限从 `/api/state` 拿（真值在 config 里）；这两个只是它还没回来时的兜底。
+let INPUT_MAX = 20000;
+let LONG_CHARS = 6000;
+
+// 拖进来的文件**先是一个待发的附件**（保持"文件的样子"），不是一坨文字。
+// 发送时才把内容并进消息——**进了对话它就是一条普通消息**，没有特例。
+let attachment = null;
+
+function renderAttach(){
+  const bar = $("attachBar");
+  if(!attachment){ bar.style.display = "none"; bar.innerHTML = ""; return; }
+  const n = attachment.text.length;
+  const warn = n > LONG_CHARS
+    ? ` <span class="warn">${t("（偏长，{p} 可能接不住——可以只留下要问的那部分）")}</span>` : "";
+  bar.style.display = "block";
+  bar.innerHTML = `<div class="att"><span class="nm">${esc(attachment.name)} · ${t("{n} 字", {n})}${warn}</span>`
+    + `<button class="ghost" onclick="editAttachment()" title="${t("放进输入框，就能看、能改")}">${t("展开改写")}</button>`
+    + `<button class="ghost" onclick="clearAttachment()">${t("移除")}</button></div>`;
+}
+
+function clearAttachment(){ attachment = null; renderAttach(); }
+
+/* 输入框随内容长高。封顶值**只在 CSS 里写一处**（`#input` 的 max-height）：
+   这里只把真实内容高度报给 style.height，超出时 max-height 把它钳住、
+   overflow-y 出滚动条。`height:auto` 一步是为了**缩回去**——不先清掉上一次
+   的 inline 高度，删字后它不会变矮。 */
+function fitInput(){
+  const box = $("input");
+  box.style.height = "auto";
+  /* +2 = 上下边框：scrollHeight 不含 border，border-box 的 height 含；
+     不加的话内容区少 2px，底部会挂一条 1-2px 的滚动位（碰整数行的余量
+     能遮住，但那是在碰运气）。 */
+  box.style.height = (box.scrollHeight + 2) + "px";
+}
+
+function editAttachment(){
+  // 想细看 / 想删掉一部分 → 放回输入框。**这时它就只是文字了**，附件状态消失。
+  if(!attachment) return;
+  const box = $("input");
+  box.value = (box.value.trim() ? box.value.replace(/\s+$/, "") + "\n\n" : "") + attachment.text;
+  clearAttachment();
+  box.focus();
+  fitInput();
+}
+
+// 拖到页面**任何**地方都别让浏览器直接打开它——那会把整页导航走，
+// 这段对话就没了。这是保护，不是功能。
+["dragover", "drop"].forEach(ev =>
+  window.addEventListener(ev, e => e.preventDefault()));
+
+const TEXT_EXT = /\.(txt|md|markdown|json|csv|log|py|js|ts|html|css|xml|yml|yaml|ini|conf|sh|sql|tex)$/i;
+
+function looksText(f){
+  if(TEXT_EXT.test(f.name)) return true;
+  if(f.type && f.type.startsWith("text/")) return true;
+  return !/\.[a-z0-9]{1,6}$/i.test(f.name);      // 没扩展名：当纯文本试
+}
+
+async function dropFiles(e){
+  const box = $("input");
+  box.classList.remove("dropping");
+  const files = Array.from((e.dataTransfer && e.dataTransfer.files) || []);
+  if(!files.length) return;
+  if(files.length > 1)
+    bubble("sys", "系统", t("一次只收一个文件——先用第一个（{name}）。", {name: files[0].name}));
+  const f = files[0];
+
+  if(f.type && f.type.startsWith("image/")){
+    bubble("sys", "系统", t("{p} 看不了图（没有多模态）。要给 {p} 看，就贴成文字。"));
+    return;
+  }
+  // docx / pdf 现在不做（设计稿 12.2）：docx 是 zip+XML，浏览器原生能做，
+  // 但先验证「拖入」这条交互本身；这两类的旁路是"另存为 txt 再拖"。
+  if(/\.(docx?|pdf)$/i.test(f.name)){
+    bubble("sys", "系统", t("{name} 现在读不了——用 Word「另存为」存成 txt 或 md 再拖进来就行。", {name: f.name}));
+    return;
+  }
+  if(!looksText(f)){
+    bubble("sys", "系统", t("{name} 不像文本文件，没读。", {name: f.name}));
+    return;
+  }
+
+  let text = "";
+  try{
+    text = await new Promise((res, rej) => {
+      const r = new FileReader();
+      r.onload = () => res(String(r.result || ""));
+      r.onerror = () => rej(r.error || new Error("读不了"));
+      r.readAsText(f, "utf-8");
+    });
+  }catch(err){
+    bubble("sys", "系统", t("{name} 没读成：{why}", {name: f.name, why: err.message}));
+    return;
+  }
+  // 替换字符 = 编码不对。**说出来，而不是默默塞一堆乱码给他**
+  if(text.includes("\uFFFD")){
+    bubble("sys", "系统", t("{name} 读出来是乱码，它大概不是 UTF-8——另存成 UTF-8 再拖一次。", {name: f.name}));
+    return;
+  }
+
+  let note = "";
+  if(text.length > INPUT_MAX){
+    text = text.slice(0, INPUT_MAX);
+    note = t("，太长就取了前 {n} 字（可以在这里删掉不要的部分）", {n: INPUT_MAX});
+  }
+  // **原样收下**：不加「来自 x.md」这类前缀——进记忆时这条消息的来源只有一个，
+  // 就是他。但先以**附件**的样子待着，不把整篇摊进输入框。
+  attachment = {name: f.name, text: text};
+  renderAttach();
+  bubble("sys", "系统", t("已收下 {name}（{n} 字）{note}——发送时会一起发过去；想先改就点「展开改写」。",
+    {name: f.name, n: text.length, note}));
+}
+
+/* ---------- 启动 ---------- */
+// 输入法合成**结束**的时刻（Esc 那条保险用，见下面 keydown 里的说明）。
+let compEndAt = 0;
+$("input").addEventListener("compositionend", () => { compEndAt = Date.now(); });
+$("input").addEventListener("keydown", (e) => {
+  // ⚠️ **输入法合成中一律不管**（2026-10-07 补）：中文输入法用 Enter 选词、按 Esc
+  // 取消候选，浏览器照样发 keydown（`isComposing` 为真；老浏览器 `keyCode` 是 229）。
+  // 不挡的话：选词那一下会把**半截话直接发出去**，而 Esc 取消候选会把输入框
+  // **整条清空**（`endEdit(true)`）——两个都是丢字。
+  if(e.isComposing || e.keyCode === 229) return;
+  // 取消候选那一下还有一层浏览器差异：有些浏览器里 Esc 的 keydown **晚于**
+  // `compositionend` 才发（那时 `isComposing` 已经是 false）——只看上面那条，
+  // 它会被当成"取消编辑"。刚合成完的这一小段里 Esc 一律不管：**误吞的代价只是
+  // 再按一次，误清的代价是整段草稿没了**（不对称，所以宁可不认这一下）。
+  if(e.key === "Escape" && Date.now() - compEndAt < 120) return;
+  if(e.key === "Enter" && !e.shiftKey){ e.preventDefault(); send(); }
+  // Esc 退出编辑态（同 ai-chatbot 的 `handleCancelEditMouseDown` 那条键位）
+  if(e.key === "Escape" && editingTurn){ e.preventDefault(); endEdit(true); }
+});
+// 打字 / 粘贴都过这里：输入框随内容长高（封顶与滚动见 #input 的 CSS）
+$("input").addEventListener("input", fitInput);
+// 窗口 / 侧栏尺寸一变，已有文本的折行数就变了（同样的字，窄了多折几行）——
+// 高度得跟着重算，否则窄了最后几行会被截住。空框不碰：fitInput 会把空框
+// 设成一个有零头的 inline 高度，空框应当保持 CSS 给的 46px。
+window.addEventListener("resize", () => { if($("input").value) fitInput(); });
+["dragenter", "dragover"].forEach(ev =>
+  $("input").addEventListener(ev, () => $("input").classList.add("dropping")));
+$("input").addEventListener("dragleave", () => $("input").classList.remove("dropping"));
+$("input").addEventListener("drop", dropFiles);
+
+/* ---------- 人格：和谁聊（air / mia / xina） ---------- */
+// 选项列表从后端来（扫 self/personas/，加一个 md 即多一个选项）；
+// 切换 = 一次 POST，**下一句生效**——对话每轮现读人格（chat.load_persona）。
+// id 是小写英文文件名（会写进原文署名）；下拉里显示的是**人格文件首行**那个名字
+// （中文也行，2026-10-05）——跟在后面的注释是出厂三位的路子，新人格没有注释。
+// 「名字从哪来」只有一处：文件的 `# 首行`（后端解析，页面只显示）。
+const PERSONA_LABEL = {air: "air", mia: "mia", xina: "xina"};
+const PERSONA_NOTE = {air: "共情、温暖", mia: "轻松、灵动", xina: "诚实、严谨"};
+/* 显示名（文件首行 `# xxx`）由后端随 `/api/persona` 下发，**页面里不抄一份**——
+   人格文件是他能新建 / 能改的东西，页面钉死名字就会和文件漂开（2026-10-05）。
+   下面是出厂三位的兜底：拿不到后端时（接口挂了）至少名字还在。 */
+function personaText(n){
+  const label = PERSONA_LABEL[n] || n;
+  const base = label === n ? label : `${label}（${n}）`;   // 自定名后面跟 id，看得清是谁
+  const note = PERSONA_NOTE[n];
+  if(!note) return base;   // 以后新增人格：只有名字（注释是逐个人格写的）
+  return LANG === "en" ? `${base} (${t(note)})` : `${base}（${t(note)}）`;
+}
+async function loadPersona(){
+  try{
+    const d = await api("/api/persona");
+    CUR_PERSONA = d.persona || "air";     // 界面所有 {p} 文案跟着它走
+    (d.items || []).forEach(it => {       // 显示名跟文件走
+      if(it && it.id && it.display) PERSONA_LABEL[it.id] = it.display;
+    });
+    const sel = $("personaSel");
+    sel.innerHTML = (d.names || ["air"]).map(n =>
+      `<option value="${esc(n)}"${n === d.persona ? " selected" : ""}>${esc(personaText(n))}</option>`
+    ).join("");
+  }catch(e){ /* 拉不到先空着——不拦别的渲染 */ }
+}
+$("personaSel").addEventListener("change", async (e) => {
+  const name = e.target.value;
+  try{
+    const d = await api("/api/persona", {method:"POST",
+      headers:{"Content-Type":"application/json"}, body: JSON.stringify({persona: name})});
+    CUR_PERSONA = d.persona || name;      // 先换名：下面的提示与重刷都用新的
+    bubble("sys", "系统", t("已切到「{name}」——下一句起，说话的就是 {p}。",
+      {name: PERSONA_LABEL[d.persona] || d.persona}));
+    paintStatic();      // 静态文案（data-t 里的 {p}）重刷
+    refreshAll();       // 面板说明也跟着换名
+  }catch(err){ alert(t("切换失败：") + err.message); loadPersona(); }
+});
+
+/* **先定语言、再渲染**：所有渲染函数都依赖 LANG 已经对了（中文原文是 key）。
+   拿不到语言就兜底中文——这是本地服务，失败极少见，而失败不该拦界面。 */
+async function boot(){
+  try{
+    const s = await api("/api/state");
+    if(s.lang === "en" || s.lang === "zh") LANG = s.lang;
+  }catch(e){ /* 兜底中文 */ }
+  document.documentElement.lang = LANG === "en" ? "en" : "zh-CN";
+  document.title = t("air-link-01 · 记忆实验台");
+  // 宽屏：对话右侧给「更早的对话」让一列（阈值与 CSS 的 body.wide 一致）。
+  // 判定一次就够：内容渲染进哪边是启动时定死的——缩窗口不搬家，刷新重判。
+  document.body.classList.toggle("wide", matchMedia("(min-width:1200px)").matches);
+  paintStatic();
+  renderTabs();
+  refreshAll();
+  renderSpeakToggle();
+  renderAsideBtn();
+  loadPersona();
+  refreshVoicePower();
+  setInterval(refreshVoicePower, 30000);   // 低频校准：别处起/关过服务时，顶栏按钮也跟上
+}
+// 存下 promise：下面的历史回填要等**语言定完**再渲染（见调用处说明）
+const bootP = boot();
+
+/* ---------- 重启/刷新后回填对话区 ---------- */
+// 窗口里的对话（还没进长期库的那一段 + 压缩摘要）存在服务端文件里，
+// **每次变化都会落盘**——但页面从来没拉过它，所以一重启对话区就是空的
+// （数据在、界面没了，看起来像"air 把刚才聊的忘了"）。这里把它拉回来。
+// （原来这里记一个"回填到哪一刻"的水位给留言去重用——留言那条路
+//   2026-10-05 晚整块删了，水位也跟着删：没有第二个消费方。）
+async function loadHistory(){
+  try{ renderHistory(await api("/api/history")); }
+  catch(e){ /* 历史读不到不影响新对话 */ }
+}
+
+/* 把一份 `/api/history` 画到屏幕上。**它只管画、不负责擦**——两处调用都先清干净
+   （`clearChat`：`#msgs` / `#histAside` / 轮次栈三样都收）：启动那次是空容器，
+   `resyncChat` 那次得自己先收（不然记录会叠一份）。 */
+function renderHistory(h){
+  try{
+    const msgs = h.messages || [], digest = h.digest || [], raws = h.raws || [];
+    if(!msgs.length && !digest.length && !raws.length) return;
+    // 宽屏时右侧栏（#histAside）只住**压缩摘要**（+唤醒，见 CSS）——
+    // 对话区中间的"历史记录"（原文段）**留在中间**，记录不该离开主列。
+    // （2026-09-20 踩过：整块搬右列后中间只剩分隔线。）
+    const wide = document.body.classList.contains("wide");
+    const hist = wide ? $("histAside") : $("msgs");
+    // 已提取的原文（最近几段）——「重启后记录没了」正落在这里：
+    // 窗口一提取就清空，但原文还在（raws），按段摊开就是记录本身。
+    // **留在对话区中间**：这是"历史对话记录"本尊，右列只住摘要与唤醒。
+    if(raws.length){
+      const head = document.createElement("div");
+      head.className = "m sys";
+      head.innerHTML = `<div class="bubble">${t("—— 更早的对话（原文 · 已进长期库）——")}</div>`;
+      $("msgs").appendChild(head);
+      raws.forEach(r => {
+        const sep = document.createElement("div");
+        sep.className = "m sys";
+        sep.innerHTML = `<div class="bubble">${esc(r.id || "")} · ${esc((r.time || "").slice(5, 16))}</div>`;
+        $("msgs").appendChild(sep);
+        (r.messages || []).forEach(m => {
+          const isUser = (m.speaker || "user") === "user";
+          // 署名用**当时的真名**（原文里是谁说的，2026-09-21）：切了人格看旧记录，
+          // 显示的是说那句话的人，不是当前这个人；旧原文没有 persona → 回退 air
+          // （与后端 `render_conversation` / `gist_line` 同一口径）。
+          const who = isUser ? t("你") : (m.persona || "air");
+          const d = document.createElement("div");
+          d.className = "m " + (isUser ? "user" : "air");
+          d.innerHTML = `<div class="who">${esc(who)}</div>`
+            + `<div class="bubble"><div class="txt">${md((m.text || "").trim())}</div></div>`;
+          // **原文才是"这条消息的文本"**：屏幕上那份过了 `md()`（`**粗体**` 与
+          // 反引号被渲染掉了），拿它当原文会**复制出一条被改过的消息**——
+          // 复制 / 朗读 / 编辑 / 重新生成都取 `_text`（见 `bubbleText`）。
+          d._text = m.text || "";
+          $("msgs").appendChild(d);
+          // 已进长期库的这段**只有复制和朗读**：「编辑 / 重新生成」只挂在**窗口里**
+          // 那些轮次上（见 `bindLastTurn` 与下面窗口那一段的回填）——改它们要撤掉整轮，
+          // 而它们早就被提取走了（撤不掉，所以不给按钮）。
+          const row = msgActions(d, () => bubbleText(d));
+          if(!isUser) addSpeakBtn(row, d);
+        });
+      });
+    }
+    if(digest.length){
+      // 压缩摘要：宽屏住右列（摘要批那一坨就是从这里搬走的）；窄屏照旧在对话区。
+      if(wide){
+        const head = document.createElement("div");
+        head.className = "as-head";
+        head.textContent = t("压缩摘要");
+        const note = document.createElement("div");
+        note.className = "as-note";
+        note.textContent = t("已进长期库。全文在「打捞」，结构化记忆在「场景」。");
+        hist.appendChild(head);
+        hist.appendChild(note);
+        digest.forEach(x => {
+          const box = document.createElement("div");
+          box.className = "doc";
+          const bar = document.createElement("span");
+          bar.className = "docbar";
+          bar.textContent = t("摘要批（点开看）");
+          const body = document.createElement("div");
+          body.className = "doctext";
+          body.textContent = x;
+          box.appendChild(bar);
+          box.appendChild(body);
+          box.addEventListener("click", () => box.classList.toggle("open"));
+          hist.appendChild(box);
+        });
+      }else{
+        const d = document.createElement("div");
+        d.className = "m sys";
+        d.innerHTML = `<div class="who">${t("更早的对话（压缩摘要）")}</div><div class="bubble">`
+          + digest.map(x => `<div class="doc" onclick="this.classList.toggle('open')">`
+              + `<span class="docbar">${t("摘要批（点开看）")}</span>`
+              + `<div class="doctext">${esc(x)}</div></div>`).join("")
+          + `</div>`;
+        hist.appendChild(d);
+      }
+    }
+    // 窗口里的每一轮都要入栈（**不只最后一条**，2026-10-07 放宽）：它们都还在
+    // 窗口里，都撤得掉。按「他一句 + 她回的那些」成对收——末尾只有他一句
+    // （她还没回 / 被叫停到没说话）时，air 那头给 null。
+    let winUser = null;
+    msgs.forEach(m => {
+      const isUser = (m.speaker || "user") === "user";
+      // 窗口里的署名同样认 `persona`（这条是谁说的，不是"现在是谁"）——
+      // 旧的（没这个字段）回退 "air"：那是加字段之前的残留，而当时就是 air 在说
+      // （与后端 `render_conversation` / 原文回填同一口径）
+      const who = isUser ? t("你") : (m.persona || "air");
+      const d = document.createElement("div");
+      d.className = "m " + (isUser ? "user" : "air");
+      d.innerHTML = `<div class="who">${esc(who)}`
+        + `<span style="margin-left:8px;opacity:.65">${esc((m.ts || "").slice(5, 16))}</span></div>`
+        + `<div class="bubble"><div class="txt">${md(m.text || "")}</div></div>`;
+      // ⚠️ **这条不能省**（2026-10-07 补）：屏幕上那份过了 `md()`，`**粗体**` 与
+      // 反引号都被渲染掉了——`bubbleText` 于是回退去读 DOM，**重新生成 / 编辑
+      // 会拿一条被改过的文本重发**（改编辑那条最阴：他点了保存，落进窗口的
+      // 是一句他没说过的话）。留 `_text` = 窗口里存的那份原文。
+      d._text = m.text || "";
+      $("msgs").appendChild(d);
+      // 说到一半被叫停的那句（`interrupted` 是窗口里落下的字段）：
+      // **刷新前后都要标同一个「（已停止）」**——不然回填后看的人分不清
+      // "她说完了"和"被叫停了"（标记只加在署名后，正文一个字不动）。
+      if(m.interrupted) markStopped(d);
+      const row = msgActions(d, () => bubbleText(d));
+      if(!isUser) addSpeakBtn(row, d);
+      // 成对入栈：见到新的一句就把上一轮收口（她的回话可能不止一条——被叫停那条
+      // 也算这一轮的产物，所以取**最后一条 air**）
+      if(isUser){
+        if(winUser) pushTurn(winUser.el, winUser.air);
+        winUser = {el: d, air: null};
+      } else if(winUser){
+        winUser.air = d;
+      }
+    });
+    if(winUser) pushTurn(winUser.el, winUser.air);
+    // 上面那段"原文"里的消息早就进长期库了，没得撤——所以它们没有按钮。
+    $("msgs").scrollTop = $("msgs").scrollHeight;
+  }catch(e){ /* 画不出来不该拦界面 */ }
+}
+
+/* ---------- 屏幕与窗口对不上时的收口：**不猜，去问** ---------- */
+/* 有一类失败，客户端**分不清**这一轮在窗口里长什么样：撤销请求断在半路（撤没撤？）、
+   流断在半路（她半句落没落？）。分不清就不许按猜的摆屏幕——"看着改了、其实没改"
+   那类错位就是这么来的。`/api/history` 的 `messages` 就是窗口逐字那一份：拉回来
+   照着重画一遍，屏幕即窗口。
+
+   `text`：这一轮他说的那句——拿它判"窗口里到底有没有这一轮"（见 `windowHasTail`），
+   只有**没有**才退回输入框：有的话它已经在屏幕上（还带着铅笔 / 弯箭头），
+   再塞回输入框等于让人白说一遍。
+   `why`：给用户的一句交代（各条路的说法不同：撤不成 / 断在半路 …）。
+
+   **先拉到、再清屏**：拉不到就一个字都不动——同一个网络故障里"先清后拉"会把
+   对话区清空，那比错位更难收拾。 */
+async function resyncChat(text, why){
+  let h = null;
+  try{ h = await api("/api/history"); }catch(e){ h = null; }
+  if(h === null){
+    if(text){ const box = $("input"); box.value = text; fitInput(); box.focus(); }
+    bubble("sys", "系统", t("（{w}，也读不到服务端的现状——刷新一下页面看真实情况）", {w: why}));
+    return;
+  }
+  clearChat();
+  renderHistory(h);
+  if(text && !windowHasTail(h, text)){
+    const box = $("input"); box.value = text; fitInput(); box.focus();
+  }
+  bubble("sys", "系统", t("（{w}——已按服务端的现状把这一段重新对上）", {w: why}));
+}
+
+/* 窗口末尾是不是**他说的这一句**：判"这一轮到底落进窗口没有"。
+   从末尾往回扫过她的回话（她可能没说、也可能只说了半句），落到最近的一条用户
+   消息上再比——它就是他说的上一句。 */
+function windowHasTail(h, text){
+  const msgs = ((h || {}).messages) || [];
+  let i = msgs.length - 1;
+  while(i >= 0 && (msgs[i].speaker || "user") !== "user") i--;
+  if(i < 0) return false;
+  return ((msgs[i].text || "").trim()) === (text || "").trim();
+}
+
+// 等 boot **定完语言**再回填：历史署名（你 / 她）按语言渲染，
+// 抢跑会闪一段中文（两个请求同时发，谁先回来不定）。
+// （原来这里还接一支 `pollOpenings`「看她有没有留言」——2026-10-05 晚
+//   主动开口整块删了，留言面板与轮询一起撤，见待优化稿 K 条。）
+// （原来末尾还发一条"记忆实验台已就绪"系统消息——每次刷新都冒一条、
+//   对天天用的人没有信息量，2026-09-20 删了：系统的状态由界面自己表达。）
+bootP.then(() => loadHistory());
+</script>
+</body>
+</html>

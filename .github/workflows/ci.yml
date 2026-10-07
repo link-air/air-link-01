@@ -1,0 +1,44 @@
+# 开源仓库的 CI：测试 + 发布前自检 + 生成物对账。
+#
+# 为什么只有这些：这个项目的验收标准是"测试全过 + 描述与实现不漂移"，
+# 所以 CI 就干三件事——跑测试、跑 `tools/prepublish_check.py`（密钥含历史 / PII / i18n 缺口）、
+# 跑 `tools/module_index.py --check`（接口总表是生成物，不能和代码不一致）。
+# 不装任何依赖：测试是离线的（mock LLM + mock 向量），检查脚本只用标准库。
+
+name: tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  check:
+    name: ${{ matrix.os }} · py${{ matrix.python }}${{ matrix.experimental && ' (experimental)' || '' }}
+    runs-on: ${{ matrix.os }}
+    # 开发平台是 Windows；Linux 全标准库、理论上同样能跑，但没长期验证过——
+    # 所以它跑通了最好，跑不通不拦合并（真要做 Linux 支持时把 experimental 去掉）。
+    continue-on-error: ${{ matrix.experimental }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: windows-latest, python: "3.11", experimental: false }
+          - { os: windows-latest, python: "3.13", experimental: false }
+          - { os: ubuntu-latest, python: "3.13", experimental: true }
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0          # prepublish_check --history 要扫全历史
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: Pre-publish check (secrets incl. history / PII / i18n)
+        run: python tools/prepublish_check.py --history
+
+      - name: Generated docs in sync (docs/modules.md)
+        run: python tools/module_index.py --check
+
+      - name: Tests (offline: mock LLM + mock embeddings)
+        run: python -m unittest discover -s tests
