@@ -23,10 +23,11 @@ A **relationship-memory system** for chat: it remembers not *only* the user, but
 > The Chinese [`README.md`](README.md) is canonical · module interfaces: [`docs/modules.md`](docs/modules.md)
 
 **Zero dependencies**: Python 3.11+, standard library only — even the LLM and embedding calls are
-plain `urllib`. **No API key needed to run the whole loop**: if the LLM fails it falls back to
-conservative defaults, if embeddings are unavailable it falls back to character overlap (degraded,
-but never mute). The UI is bilingual (Chinese / English, switched in Settings — her replies follow;
-memory *content* is never translated, it is data).
+plain `urllib`. **The split is strict**: anything with a determinate answer — similarity, ranking,
+thresholds, whether a scene should be cut — is code (code beats a model at these); only the
+**semantic judgements that need a brain** ("are these the same matter?") go to the model.
+The UI is bilingual (Chinese / English, switched in Settings — her replies follow; memory *content*
+is never translated, it is data).
 
 ## Core mechanism
 
