@@ -1,5 +1,6 @@
-# CODEBUDDY.md
-This file provides guidance to CodeBuddy when working with code in this repository.
+# AGENTS.md
+This file provides guidance to AI coding agents (CodeBuddy and others) working with code in this repository.
+（文件名用 `AGENTS.md` 是刻意的：它是跨工具的通用约定，换哪个助手来读都认。）
 
 聊天版**关系记忆系统**：记住的是「这段互动」，并在该想起的时候想起它。
 
