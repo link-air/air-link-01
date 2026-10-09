@@ -9,7 +9,7 @@
 '    to start a second dashboard (it would only die on the busy
 '    port, invisibly, and look like "nothing happened")
 '
-'  To stop everything:  dashboard -> settings -> [全退出]
+'  To stop everything:  dashboard -> settings -> [Quit all]
 '  (that stops the voice service first, so the VRAM is released
 '   before the dashboard itself goes down).
 '
@@ -27,10 +27,14 @@ Set fso = CreateObject("Scripting.FileSystemObject")
 ' moved or copied anywhere without editing this file.
 root = fso.GetParentFolderName(WScript.ScriptFullName)
 
-' The interpreter: the same one run.cmd falls back to (candidate 2).
-' The python.exe on PATH is the WindowsApps stub -- it cannot run this.
-py = sh.ExpandEnvironmentStrings("%USERPROFILE%") _
-     & "\.workbuddy\binaries\python\versions\3.14.3\pythonw.exe"
+' The interpreter, in order of preference:
+'   1) pythonw.exe / python.exe resolved on PATH, skipping the WindowsApps
+'      stub (that entry is not Python -- it just opens the Store);
+'   2) this dev machine's known install path (fallback for a machine whose
+'      PATH is not set up).
+' Resolved by NAME via `where`, never by *running* a candidate: see the note
+' on FindInterpreter below for why running one is not a usable probe here.
+py = FindInterpreter()
 
 ' Already up? Then just show the page and nudge the voice service.
 ' GET first (read-only, safe to aim at whatever answers), then the POST.
@@ -52,9 +56,10 @@ End If
 Err.Clear
 On Error GoTo 0
 
-If Not fso.FileExists(py) Then
-  MsgBox "Not found:" & vbCrLf & py & vbCrLf & vbCrLf _
-       & "Edit this file and point the py line at your pythonw.exe.", 16, "air-link-01"
+If py = "" Then
+  MsgBox "No usable Python found." & vbCrLf & vbCrLf _
+       & "Install Python 3.11+ and make sure pythonw.exe is on PATH," & vbCrLf _
+       & "or edit this file and put your path in FindInterpreter().", 16, "air-link-01"
   WScript.Quit 1
 End If
 If Not fso.FileExists(fso.BuildPath(root, "core\dashboard.py")) Then
@@ -66,3 +71,35 @@ End If
 sh.CurrentDirectory = root
 ' 2nd arg 0 = hidden window, 3rd arg False = do not wait for it
 sh.Run """" & py & """ -m core.dashboard --with-voice", 0, False
+
+
+' Pick the interpreter: the first usable hit on PATH, else the known local
+' install path, else "" (the caller shows a clear message).
+'
+' Why resolve by name with `where` instead of *running* each candidate and
+' looking at the exit code (the way run.cmd's :try does): a GUI-subsystem
+' pythonw does not report a meaningful exit code through WshShell.Run (it
+' comes back 1 for a perfectly good interpreter, measured 2026-10-09), and
+' invoking the WindowsApps stub would open the Store and hang this script
+' behind that window. `where` + FileExists has neither problem.
+Function FindInterpreter()
+  Dim cands, i, ex, p, fallback
+  FindInterpreter = ""
+  cands = Array("pythonw.exe", "python.exe")
+  For i = 0 To UBound(cands)
+    Set ex = sh.Exec(sh.ExpandEnvironmentStrings("%ComSpec%") _
+                     & " /c where " & cands(i) & " 2>nul")
+    Do While Not ex.StdOut.AtEndOfStream
+      p = Trim(ex.StdOut.ReadLine())
+      If Len(p) > 0 And InStr(LCase(p), "windowsapps") = 0 Then
+        If fso.FileExists(p) Then
+          FindInterpreter = p
+          Exit Function
+        End If
+      End If
+    Loop
+  Next
+  fallback = sh.ExpandEnvironmentStrings("%USERPROFILE%") _
+    & "\.workbuddy\binaries\python\versions\3.14.3\pythonw.exe"
+  If fso.FileExists(fallback) Then FindInterpreter = fallback
+End Function

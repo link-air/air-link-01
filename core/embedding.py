@@ -25,8 +25,8 @@ local:// 模式才需要 sentence-transformers（可选，懒加载）。
 # 模块速查
 #   层级    ：L2 外部服务（向量）
 #   上游    ：config（在 `chat.build_embedding` 里读）
-#   下游    ：scene（算检索向量）、recall（算查询向量与相似度）、
-#             distill / trend / weave / tools / salvage（凡要论相似的地方）
+#   下游    ：scene（算检索向量）、recall（算查询向量与相似度）、chat（建服务）、
+#             memo / settings（测试连接）、distill / trend / weave / tools / salvage
 #   对外入口：`EmbeddingService`（`embed` / `embed_one` / `degraded`）、
 #             `cosine` / `embedding_novelty`
 #   边界    ：**失败一律返回 None，不抛**——降级与否由调用方决定怎么兜

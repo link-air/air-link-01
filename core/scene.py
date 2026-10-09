@@ -16,7 +16,8 @@ LLM 判一次就是一次调用；embedding 距离是免费的，且是 EM-LLM s
 # 模块速查
 #   层级    ：L4 写入侧（切分与抽取）
 #   上游    ：config、embedding（距离）、model、prompts（抽字段的 prompt 与 schema）
-#   下游    ：shortterm（什么时候该切）、distill（它来调这一层的抽取）
+#   下游    ：shortterm（什么时候该切，并从这取 `Message` 契约）、
+#             distill（它来调这一层的抽取）、salvage（照原文重记）
 #   对外入口：`should_cut` / `should_cut_texts`（降级版）/ `extract_scene` /
 #             `render_conversation` / `behavior_intensity` / `is_trivial`
 #   边界    ：**不落库**。它给出"这一段是一张什么卡"，写是 distill 的事

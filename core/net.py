@@ -31,7 +31,8 @@ Windows / macOS 上还认系统设置），只加一条它没有的：loopback �
 # 模块速查
 #   层级    ：L2 外部服务（出站网络）——所有网络调用的公共底座
 #   上游    ：标准库 urllib（无项目内依赖）
-#   下游    ：llm / embedding / dashboard（经全局 opener）、webfetch（proxied）
+#   下游    ：core/__init__（import 即装）、settings（保存时重装）、embedding（走 `open()`）、
+#             webfetch（`proxied`）；llm / 语音客户端经全局 opener 受益（不 import 它）
 #   对外入口：`install()` / `open()` / `proxied()` / `is_loopback()`
 #   边界    ：**只做"走哪条路"**——超时 / 重试 / 证书 / 上限各自在调用方，
 #             这里不替它们做主

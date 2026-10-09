@@ -24,14 +24,11 @@
 # ---------------------------------------------------------------------
 from __future__ import annotations
 
-import json
 import re
-from datetime import datetime
 
-from . import config as cfgmod
 from . import persona as persona_file
 from .embedding import cosine
-from .store import RAW_HEAD, now_str
+from .store import RAW_HEAD, append_trace, now_str
 
 _WORD = re.compile(r"[\u4e00-\u9fa5A-Za-z0-9]+")
 
@@ -323,11 +320,4 @@ def rebuild_confirmed(store, llm, scene_id: str, on_date: str = "",
 
 def _trace(record: dict) -> None:
     """打捞也留痕——**翻过什么、找回过什么**同样要能回看。"""
-    try:
-        d = cfgmod.abspath(cfgmod.PATHS["trace_dir"])
-        d.mkdir(parents=True, exist_ok=True)
-        path = d / f"打捞-{datetime.now().strftime('%Y%m%d')}.jsonl"
-        with open(path, "a", encoding="utf-8") as f:
-            f.write(json.dumps({"ts": now_str(), **record}, ensure_ascii=False) + "\n")
-    except Exception as e:
-        print(f"[salvage] 留痕失败（不影响结果）: {e}")
+    append_trace("打捞", {"ts": now_str(), **record})

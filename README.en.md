@@ -191,7 +191,7 @@ Ollama or OpenAI.
 
 ```
 air-link-01/
-├── core/            the system, 24 modules (each head carries a "module quick-ref" block)
+├── core/            the system, 24 modules (all but `__init__.py` carry a "module quick-ref" block)
 ├── web/index.html   the whole front end in one file (zero deps, CN/EN dictionary inline)
 ├── self/personas/   persona files (air / mia / xina) — files are the source, the UI is an editor
 ├── tests/           offline suite (mock LLM + mock embeddings)

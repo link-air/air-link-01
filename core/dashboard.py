@@ -9,7 +9,7 @@
 
 两条约定：
   - **只读接口不碰写**：查库、看 trace 都不会改记忆
-  - **内容的写只有一个入口**：`POST /api/chat`，走 `ChatSession.reply` 那条完整链路
+  - **内容的写只有一个入口**：`POST /api/chat/stream`，走 `ChatSession` 那条完整链路
     （唤醒 → 生成 → 写入）。绕过对话层直接塞场景 / 画像 / 备忘的口子一个都不开——
     开了就迟早有人绕过链路塞数据进来。
 
@@ -195,7 +195,10 @@ class App:
         return self._session
 
     def chat(self, msg: str) -> dict:
-        """走完整链路回一句话（**加锁**）。
+        """走完整链路回一句话（**加锁**）——非流式，流式那版是 `chat_stream`。
+
+        HTTP 那个 `/api/chat` 口 2026-10-09 删了（仓内无人调），这个方法仍被
+        测试与进程内调用用着：两条路共用对话层同一条链路。
 
         为什么要锁：会话带状态（短期窗口），两个请求同时进来会让窗口错乱——
         比如两段对话被交叉写进同一个窗口段。
@@ -243,7 +246,7 @@ class App:
         except Exception as e:
             return {"ok": False, "detail": (
                 f"连不上语音服务（{base}）：{type(e).__name__}。"
-                f"顶栏那个「语音」按钮点一下就能起，或者按 tts/README.md「三、跑」手动起；"
+                f"顶栏那个「语音」按钮点一下就能起（没装过就按 tts/_dl/setup_tts.ps1 装一次）；"
                 f"不想用就把 config.local.json 里的 tts.endpoint 设成空串")}
         if not wav:
             return {"ok": False, "detail": "语音服务返回了空音频"}
@@ -285,7 +288,7 @@ class App:
         except Exception as e:
             return {"ok": False, "detail": (
                 f"连不上语音服务（{base}）：{type(e).__name__}。"
-                f"顶栏那个「语音」按钮点一下就能起，或者按 tts/README.md「三、跑」手动起；"
+                f"顶栏那个「语音」按钮点一下就能起（没装过就按 tts/_dl/setup_tts.ps1 装一次）；"
                 f"不想用就把 config.local.json 里的 tts.endpoint 设成空串")}
         head = r.read(12)
         if len(head) < 12 or head[:4] != b"ARAU":
@@ -388,7 +391,7 @@ class App:
             py = scripts / ("python.exe" if os.name == "nt" else "python")
         if not py.exists():
             return {"ok": False, "detail": (
-                f"没找到 {py}——按 tts/README.md「二、装」装一次（要 torch，几个 G）")}
+                f"没找到 {py}——按 tts/_dl/setup_tts.ps1 装一次（要 torch，几个 G）")}
         log = tts_dir / "_dl" / "server.log"
         try:
             log.parent.mkdir(parents=True, exist_ok=True)
@@ -548,17 +551,6 @@ class App:
         body.update(extra)
         return json.dumps(body, ensure_ascii=False).encode("utf-8")
 
-    def pending_view(self) -> dict | None:
-        """她在等什么（界面拿它弹确认条）。**不触发建会话**——没有会话就是没有。
-
-        读的是会话内部状态，所以也要走那把锁：`confirm` 在锁里改它，
-        界面在锁外读它可能读到改到一半的确认条（弹出来是空的 / 少一条）。
-        """
-        if not self._session:
-            return None
-        with self._lock:
-            return self._session.pending_view()
-
     def confirm(self, action: str = "") -> dict:
         """他点了确认条上的动作（`delete` / `archive` / `keep` / `accept`）——
         改与删的主通道（三档见 `ChatSession.confirm`）。"""
@@ -608,7 +600,9 @@ class App:
     def end(self) -> dict | None:
         """收尾：提取最后一段 → 后台整理。与 `new_session` 只差「摘要清不清」。
 
-        界面上的按钮现在是「新对话」；这个口留着收尾语义（外部脚本 / 实验用）。
+        界面上的按钮现在是「新对话」；**退出路径自己也在用它**（`serve()` 末尾的
+        收尾就调 `App.end()`）。HTTP 那个口 `/api/end` 2026-10-09 删了：它和
+        `/api/new-session` 是同一个动作（只差清不清摘要），而仓内没人调。
         """
         return self._close_session(clear_digest=False)
 
@@ -1309,9 +1303,9 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:                    # noqa: N802
         """**写**路由表。四类，边界很清楚：
 
-        ① **内容写入——只有一个口子**：/api/chat、/api/chat/stream
-           都走 `ChatSession` 的完整链路。绕过对话层直接塞场景 / 画像 / 备忘的
-           口子一个都不开。
+        ① **内容写入——只有一个口子**：/api/chat/stream
+           走 `ChatSession` 的完整链路。绕过对话层直接塞场景 / 画像 / 备忘的
+           口子一个都不开。（非流式的 `/api/chat` 2026-10-09 删——仓内无人调。）
 
         ② **人的纠正**：/api/confirm（提议的改删三选一、他点一下才算数）·
            /api/memory-action（**改 / 删 / 归档 / 取消归档——三层同一个口**，
@@ -1327,8 +1321,9 @@ class Handler(BaseHTTPRequestHandler):
 
         ④ **环境与外挂**（不改记忆）：/api/settings(+preset/test) ·
            /api/voice(+config/start/stop) · /api/speak ·
-           /api/end · /api/new-session · /api/distill · /api/turn-undo · /api/quit
-           （`/api/openings-seen` 2026-10-05 晚撤——留言整块不要了）
+           /api/new-session · /api/distill · /api/turn-undo · /api/quit
+           （`/api/openings-seen` 2026-10-05 晚撤——留言整块不要了；
+           `/api/end` 2026-10-09 撤——与 `/api/new-session` 同一个动作、仓内无人调）
 
         ⚠️ `/api/quit` 先回话、再在后台线程里收尾（收语音要等十几秒，见 `_quit_all`）。
         """
@@ -1337,37 +1332,14 @@ class Handler(BaseHTTPRequestHandler):
         app = self.app
         try:
             if u.path == "/api/chat/stream":
-                # 流式那一版（思维链可展开）。**非流式的 `/api/chat` 留着**——
-                # 实验脚本、demo 走它，两条路共用对话层同一条链路。
+                # 内容写入的**唯一** HTTP 口（流式，思维链可展开）。2026-10-09 删掉了
+                # 非流式的 `/api/chat`：仓内没人调（demo 与实验回放直接拿 `ChatSession`），
+                # 留着就是一条没人走过的路。`App.chat` 那个非流式方法仍在（测试与
+                # 进程内调用用），两条路共用对话层同一条链路。
                 msg = (body.get("msg") or "").strip()
                 if not msg:
                     return self._json({"error": "空消息"}, 400)
                 return self._sse(app.chat_stream(msg))
-            if u.path == "/api/chat":
-                msg = (body.get("msg") or "").strip()
-                if not msg:
-                    return self._json({"error": "空消息"}, 400)
-                out = app.chat(msg)
-                return self._json({
-                    "reply": out["reply"],
-                    "written": out["written"],
-                    "recall": _recall_view(out["recall"]),
-                    # 提过一次的备忘转成「已提」（之后不再提），
-                    # 被这轮对话真的说到的场景记一次提及——都是写完之后的记账。
-                    "memo_raised": out.get("memo_raised") or [],
-                    # 这一句把哪件备忘录判成了结（她判的；没有就是 null）——
-                    # 闭合原来是个静默动作，回执是它唯一的出口
-                    "memo_closed": out.get("memo_closed"),
-                    "mentioned": out.get("mentioned") or [],
-                    # 她一个字都没回时的系统提示（前端显示为「系统」气泡；
-                    # 它不在 reply 里——那句是会被写进记忆的"她说过的话"）
-                    "hint": out.get("hint") or "",
-                    # 她这一轮动过什么（没调工具就是空）——**可观测是它的兜底**：
-                    # 她说"我记下了"但这里空着，就是没做（设计稿防错第 6 条）
-                    "tools": out.get("tools") or [],
-                    # 她在等着确认的事（界面弹那条确认条用）
-                    "confirm": app.pending_view(),
-                })
             if u.path == "/api/salvage-rebuild":
                 # 照原文重新记一遍（**不是撤销**：备份才给回原来那张卡）
                 out = salvage.rebuild_confirmed(
@@ -1397,9 +1369,6 @@ class Handler(BaseHTTPRequestHandler):
                 out = app.memo_close((body.get("id") or "").strip())
                 out["memos"] = app.memos()
                 return self._json(out)
-            if u.path == "/api/end":
-                # 收尾会自动触发一次后台整理（见 App.end）
-                return self._json({"written": app.end()})
             if u.path == "/api/new-session":
                 # 「新对话」：同样的提取 + 整理，多一步连压缩摘要一起清（见 App.new_session）
                 return self._json({"written": app.new_session()})

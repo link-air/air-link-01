@@ -33,16 +33,13 @@
 # ---------------------------------------------------------------------
 from __future__ import annotations
 
-import json
-from datetime import datetime
-
 from . import config as cfgmod
 from .embedding import cosine
 from .model import (INVALIDATED_ARCHIVE, INVALIDATED_USER,
                     LANGS, PROFILE_ESTABLISHED, PROFILE_PENDING,
                     lang_from_prefs)
-from .store import (SCENE_FIELD_LABELS, SUMMARY_FIELD_LABELS, layer_edit,
-                    now_str, split_topics)
+from .store import (SCENE_FIELD_LABELS, SUMMARY_FIELD_LABELS, append_trace,
+                    layer_edit, now_str, scene_ids, split_topics)
 
 
 def user_reject_profile(store, pid: str) -> str:
@@ -73,11 +70,6 @@ def user_reject_profile(store, pid: str) -> str:
 # ---------------------------------------------------------------------
 # R6 镜像呈现（第一版的「做」）
 # ---------------------------------------------------------------------
-
-def _s1_ids(sources) -> list[str]:
-    """从 `sources` 里挑出 S1（S2 是聚合，呈现时要下钻到具体场景才有说服力）。"""
-    return [i for i in (sources or []) if str(i).startswith("S1")]
-
 
 def render_mirror(store, topic: str | None = None, include_pending: bool = True) -> dict:
     """把「air 眼中的他」拉出来给人看（R6 的呈现动作）。
@@ -113,7 +105,7 @@ def render_mirror(store, topic: str | None = None, include_pending: bool = True)
         pack = {str(it.get("id")): it for it in (p.evidence_pack or [])
                 if isinstance(it, dict) and it.get("id")}
         sources, hidden = [], 0
-        for sid in _s1_ids(p.sources):
+        for sid in scene_ids(p.sources):
             s = store.get_scene(sid)
             if s is None:
                 continue        # 已删的不显示（引用 = sources ∩ 现存节点，2026-09-24）
@@ -820,15 +812,7 @@ def _write_change_trace(kind: str, changes: list[dict]) -> None:
 
     留痕的理由见 `save_facts_confirmed`：这类改动是最不该说不清的一类。
     """
-    try:
-        trace_dir = cfgmod.abspath(cfgmod.PATHS["trace_dir"])
-        trace_dir.mkdir(parents=True, exist_ok=True)
-        path = trace_dir / f"{kind}-{datetime.now().strftime('%Y%m%d')}.jsonl"
-        with open(path, "a", encoding="utf-8") as f:
-            for c in changes:
-                f.write(json.dumps({"ts": now_str(), **c}, ensure_ascii=False) + "\n")
-    except Exception as e:
-        print(f"[weave] {kind}留痕失败（不影响改动本身）: {e}")
+    append_trace(kind, [{"ts": now_str(), **c} for c in changes])
 
 
 def _write_facts_trace(changes: list[dict]) -> None:
@@ -837,13 +821,6 @@ def _write_facts_trace(changes: list[dict]) -> None:
 
 
 def _write_merge_trace(from_topic: str, to_topic: str, n: int) -> None:
-    """合并留痕（与否决 trace 同目录、同理由：**人对系统的纠正要可见**）。"""
-    try:
-        trace_dir = cfgmod.abspath(cfgmod.PATHS["trace_dir"])
-        trace_dir.mkdir(parents=True, exist_ok=True)
-        path = trace_dir / f"合并-{datetime.now().strftime('%Y%m%d')}.jsonl"
-        record = {"ts": now_str(), "from": from_topic, "to": to_topic, "affected": n}
-        with open(path, "a", encoding="utf-8") as f:
-            f.write(json.dumps(record, ensure_ascii=False) + "\n")
-    except Exception as e:
-        print(f"[weave] 合并留痕失败（不影响合并结果）: {e}")
+    """合并留痕（同各处 trace：**人对系统的纠正要可见**）。"""
+    append_trace("合并", {"ts": now_str(), "from": from_topic,
+                          "to": to_topic, "affected": n})

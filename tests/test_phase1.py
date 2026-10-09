@@ -556,11 +556,20 @@ class TestShortTerm(Base):
             cfgmod.CONFIG["shortterm"]["max_turns_no_cut"] = old
 
     def test_session_idle_triggers_extract(self):
-        """空闲超时 = 会话自然结束——第 4 条触发的另一条到达方式。"""
+        """空闲超时 = 会话自然结束——第 4 条触发的另一条到达方式。
+
+        判的是「**他说这一句之前**隔了多久」（2026-10-09 修）：间隔在 `append` 里算。
+        此前判的是"现在离最后一条消息多久"，而判定挂在 flush、flush 又在 append 之后
+        ——那一刻恒为 0，这条触发在真实链路里从没生效过（L6 核对文档记过这个发现）。
+        """
         st = ShortTerm(self.store, scripted_llm(), emb_service=None,
                        session_id="t", state_path=self.root / "st.json")
-        st.append("user", "在吗")
-        st._last_active = "2020-01-01 00:00:00"     # 装作很久以前聊的
+        st.append("user", "在吗", ts="2026-01-01 10:00:00")
+        st.append("air", "在", ts="2026-01-01 10:00:05")
+        self.assertFalse(st.session_idle(), "刚聊了一轮，不算空闲")
+        st.append("user", "我又来了", ts="2026-01-01 11:00:00")   # 隔了一小时
+        # 她的回话紧跟其后成对入窗——**它不许把间隔刷成 0**（否则这条又永远不生效）
+        st.append("air", "嗯", ts="2026-01-01 11:00:02")
         self.assertTrue(st.session_idle())
         self.assertTrue(st.should_extract())
 

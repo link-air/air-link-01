@@ -1,17 +1,17 @@
 ' =============================================================
 '  ASCII alias for the no-console launcher (double-click me).
 '
-'  The canonical launcher is the Chinese-named `启动.vbs` next
-'  to this file. Its own name is not typeable on an English
-'  keyboard, so this thin alias exists: it resolves the name at
-'  runtime with ChrW() and hands over to it.
+'  The canonical launcher is the Chinese-named .vbs next to this
+'  file. Its own name is not typeable on an English keyboard, so
+'  this thin alias exists: it resolves the name at runtime with
+'  ChrW() and hands over to it.
 '
 '  Why ChrW instead of writing the name literally: this file is
-'  PURE ASCII ON PURPOSE (same reason as 启动.vbs and run.cmd --
-'  wscript/cmd read these files with the system ANSI code page,
-'  so multibyte characters in the source are a real hazard).
+'  PURE ASCII ON PURPOSE (same reason as the other launchers and
+'  run.cmd -- wscript/cmd read these files with the system ANSI
+'  code page, so multibyte characters in the source are a hazard).
 '
-'  What it does is exactly 启动.vbs: start the memory workbench
+'  What it does is exactly what the canonical launcher does: start
 '  with pythonw (no black console box) and bring the local voice
 '  service up along with it; double-clicking twice will not start
 '  a second dashboard.
@@ -29,7 +29,7 @@ Set fso = CreateObject("Scripting.FileSystemObject")
 ' Where am I? Derived from this script's own path -- the folder can be moved anywhere.
 root = fso.GetParentFolderName(WScript.ScriptFullName) & "\"
 
-' U+542F U+52A8 = "启动"  ->  "启动.vbs"
+' U+542F U+52A8 = the two CJK characters  ->  "<name>.vbs"
 target = ChrW(&H542F) & ChrW(&H52A8) & ".vbs"
 
 If Not fso.FileExists(root & target) Then

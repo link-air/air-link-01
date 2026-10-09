@@ -424,7 +424,12 @@ class ChatSession:
             self.pending_confirm = props[0]
 
     def pending_view(self) -> dict | None:
-        """给界面看的「她在等什么」——用来弹那条确认。"""
+        """给界面看的「她在等什么」——用来弹那条确认。
+
+        界面拿到它的事件是 `reply_stream` 末尾那个 `confirm` 字段，**不必另行建会话**
+        （没有会话就是没有）。调用方要**拿着锁**读：`confirm` 在锁里改 `pending_confirm`，
+        锁外读可能读到改到一半的确认条（弹出来是空的 / 少一条）。
+        """
         p = self.pending_confirm
         if not p:
             return None
@@ -894,7 +899,8 @@ class ChatSession:
 
         `clear_digest=True` 是「新对话」（见 `App.new_session`）：连压缩摘要一起清，
         窗口真的从零开始——摘要里的内容早进长期库了，需要时会靠回忆拉回来。
-        （收尾 / 空闲结束不传它：那是同一段对话的延续，摘要还要当背景。）
+        （收尾不传它：那是同一段对话的延续，摘要还要当背景。空闲超时那一路走的是
+        `shortterm.flush_if_needed`，根本不经过这里。）
         """
         # 会话都结束了，就**不该留一个待执行的删除**——
         # 隔了几天回来第一句话，很可能不是在对它点头。

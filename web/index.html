@@ -777,7 +777,6 @@ const I18N = {en: {
   "没查成：": "Search failed: ",
   "照着原文重新记一遍 {id}？\n\n这会新起一条记忆（新编号），\n不是撤销删除——删掉的就是删掉了（要留后路，删之前用「归档」）。": "Re-record {id} from the raw text?\n\nThis creates a new memory (new id); it is not an undo — a deletion is a deletion (if you want a way back, use Archive before deleting).",
   "记下了": "Recorded",
-  "没做成：": "Failed: ",
 
   /* ---- 留痕页 ---- */
   "还没有留痕。每次唤醒都会落一行。": "No traces yet. Every wake writes a line.",
@@ -846,7 +845,6 @@ const I18N = {en: {
     "New persona: the id uses lowercase letters / digits / `_` / `-` (2–16) — it gets written into transcript bylines, so CJK or punctuation would break transcript parsing.",
   "编辑「{name}」——整份文件都会原样给 {p} 看（章节名只是习惯，不是格式）。":
     "Editing \"{name}\" — the whole file goes to {p} verbatim (section titles are a habit, not a format).",
-  "保存失败：": "Save failed: ",
   "保存失败": "Save failed",
   "已保存「{name}」——下一句起就用新的。": "Saved \"{name}\" — effective from her next sentence.",
   "没改动。": "No changes.",
@@ -888,7 +886,6 @@ const I18N = {en: {
 
   /* ---- 语音页 ---- */
   "语音服务": "Voice service",
-  "状态": "Status",
   "起 / 关都在顶栏那颗「语音」按钮上（关 = 放显存）。模型到第一次播报才读——要等十几秒。": "Start/stop lives in the top-bar Voice button (stop = free VRAM). Weights load on the first utterance — expect a dozen seconds.",
   "声音模型": "Voice model",
   "改的是 tts/voice.json——保存后要点「保存并重启」才生效。": "Edits tts/voice.json — save, then \"save & restart\" to apply.",
@@ -954,7 +951,6 @@ const I18N = {en: {
   "语音服务没起——点一下 = 起起来（几秒）": "Voice service is off — click to start (a few seconds)",
   "没关掉：": "Not stopped: ",
   "没起来：": "Not started: ",
-  "操作失败：": "Action failed: ",
   "自动朗读：开（点一下关）": "Auto-read: on (click to turn off)",
   "自动朗读：关（点一下开）": "Auto-read: off (click to turn on)",
   "关闭自动朗读": "Turn auto-read off",
@@ -1949,7 +1945,7 @@ async function streamTurn(msg, air, think, userEl){
 }
 
 /* 「新对话」：把这一段收进记忆，再把对话区清空——真的重新开始。
-   后端 `/api/new-session` 和收尾（`/api/end`）是同一个动作（提取 + 后台整理），
+   后端 `/api/new-session` 干的就是收尾（提取 + 后台整理），
    只多一步：**连压缩摘要一起清**，窗口里不留上一段的东西。记录没丢：原文早进长期库，
    「打捞」里能翻、刷新页面也会按 `/api/history` 回填。
    ⚠️ 提取要调一次 LLM（几秒），期间按住按钮，防连点（连点两次会多提取一遍）。 */

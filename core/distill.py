@@ -43,7 +43,7 @@ from .prompts import (PROFILE_SCHEMA, REVISION_SCHEMA, REVIEW_SCHEMA,
                       profile_prompt, review_prompt, revision_prompt,
                       summary_prompt, topic_prompt)
 from .scene import behavior_intensity, extract_scene, render_conversation
-from .store import now_str
+from .store import append_trace, now_str, scene_ids
 
 
 def distill_step1(store, messages: list[dict], llm, emb_service=None,
@@ -125,16 +125,8 @@ def write_skip_trace(messages: list[dict], reason: str) -> None:
     `distill` 走模型判那条路，`shortterm` 走代码判那条路。
     留痕的格式与位置必须一致，否则查的时候要翻两个地方。
     """
-    try:
-        trace_dir = cfgmod.abspath(cfgmod.PATHS["trace_dir"])
-        trace_dir.mkdir(parents=True, exist_ok=True)
-        path = trace_dir / f"跳过-{datetime.now().strftime('%Y%m%d')}.jsonl"
-        record = {"ts": now_str(), "reason": reason,
-                  "preview": render_conversation(messages)[:200]}
-        with open(path, "a", encoding="utf-8") as f:
-            f.write(json.dumps(record, ensure_ascii=False) + "\n")
-    except Exception as e:
-        print(f"[distill] 跳过留痕失败（不影响流程）: {e}")
+    append_trace("跳过", {"ts": now_str(), "reason": reason,
+                          "preview": render_conversation(messages)[:200]})
 
 
 def _merge_ids(*groups) -> list[str]:
@@ -145,11 +137,6 @@ def _merge_ids(*groups) -> list[str]:
             if i and i not in out:
                 out.append(i)
     return out
-
-
-def _scene_ids(ids: list[str]) -> list[str]:
-    """从 `sources` 里挑出 S1 的 id（S2 是聚合，不直接算印证证据）。"""
-    return [i for i in (ids or []) if str(i).startswith("S1")]
 
 
 def _dominant_subject(scenes: list[Scene]) -> str:
@@ -244,7 +231,7 @@ def _cross_source_ok(profile: Profile, scenes: list[Scene]) -> bool:
 def _evidence_scenes(store, profile: Profile) -> list[Scene]:
     """这条画像的全部印证场景（顺着 sources 里的 S1 下钻）。"""
     out = []
-    for sid in _scene_ids(profile.sources):
+    for sid in scene_ids(profile.sources):
         s = store.get_scene(sid)
         if s is not None:
             out.append(s)
@@ -433,7 +420,7 @@ def _forming_ids(store, summaries) -> set[str]:
     """
     out: set[str] = set()
     for s2 in summaries or []:
-        out |= set(_scene_ids(s2.sources or []))
+        out |= set(scene_ids(s2.sources or []))
     return out
 
 
@@ -507,12 +494,12 @@ def revise_profile(store, pid: str, new_statement: str, evidence_ids: list[str],
         # 主主题是版本序列的键，附加主题是检索标签，人改"说法"时它们都没变。
         topics=list(old.topics or [old.topic]),
         subject=old.subject, statement=new_statement,
-        status=PROFILE_PENDING, evidence=len(_scene_ids(evidence_ids)),
+        status=PROFILE_PENDING, evidence=len(scene_ids(evidence_ids)),
         sources=list(evidence_ids),
         evidence_pack=_build_evidence_pack(forming_scenes),
     )
     store.add_profile(new)
-    for sid in _scene_ids(evidence_ids):
+    for sid in scene_ids(evidence_ids):
         _mark_evidence(store, sid, new.id)
     return new.id
 
@@ -579,7 +566,7 @@ def distill_step3(store, topic: str, llm, emb=None) -> Profile | None:
         new_id = revise_profile(store, current.id, new_statement, merged)
         return store.get_profile(new_id)
 
-    store.set_profile_sources(current.id, merged, evidence=len(_scene_ids(merged)))
+    store.set_profile_sources(current.id, merged, evidence=len(scene_ids(merged)))
     for s in fresh:
         # 新证据是**印证**（不是出处）：出处是画像形成时定下的那几条，不会再变。
         # 这样包和长保护期都只跟固定的一小批走（role 由包派生，不再单独记）。
@@ -863,23 +850,16 @@ def write_maint_trace(stats: dict) -> None:
     `profile_reviews` 存的是**状态**（提议等人处理），这里存的是**日志**。
     写不成不拦改动本身（同各处 trace 的兜底）。
     """
-    try:
-        trace_dir = cfgmod.abspath(cfgmod.PATHS["trace_dir"])
-        trace_dir.mkdir(parents=True, exist_ok=True)
-        path = trace_dir / f"整理-{datetime.now().strftime('%Y%m%d')}.jsonl"
-        rec = {"ts": now_str(), "act": "体检", "trigger": stats.get("trigger") or "",
-               "topic_cap": stats.get("topic_cap"),
-               "s2_new": stats.get("s2_new") or [], "s3_new": stats.get("s3_new") or [],
-               "held": len(stats.get("held") or []),
-               "established": stats.get("established") or [],
-               "aged": stats.get("aged") or [], "capped": stats.get("capped") or [],
-               "drift": stats.get("drift") or {}, "memo": stats.get("memo") or {},
-               "archived": stats.get("archived") or {},
-               "review": stats.get("review") or {}}
-        with open(path, "a", encoding="utf-8") as f:
-            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
-    except Exception as e:
-        print(f"[distill] 体检留痕失败（不影响改动本身）: {e}")
+    append_trace("整理", {
+        "ts": now_str(), "act": "体检", "trigger": stats.get("trigger") or "",
+        "topic_cap": stats.get("topic_cap"),
+        "s2_new": stats.get("s2_new") or [], "s3_new": stats.get("s3_new") or [],
+        "held": len(stats.get("held") or []),
+        "established": stats.get("established") or [],
+        "aged": stats.get("aged") or [], "capped": stats.get("capped") or [],
+        "drift": stats.get("drift") or {}, "memo": stats.get("memo") or {},
+        "archived": stats.get("archived") or {},
+        "review": stats.get("review") or {}})
 
 
 def maintenance_cycle(store, llm, emb=None, trigger: str = "",

@@ -25,18 +25,15 @@
 # ---------------------------------------------------------------------
 from __future__ import annotations
 
-import json
 import re
-from datetime import datetime
 
-from . import config as cfgmod
 from . import webfetch
 from .embedding import cosine
 from .model import (INVALIDATED_ARCHIVE,
                     MEMO_AIR_PROMISE, MEMO_PENDING, MEMO_USER_TASK,
                     PROFILE_ESTABLISHED)
 from .prompts import rel_stamp, scene_line
-from .store import TOPICS_MAX, layer_edit, now_str
+from .store import TOPICS_MAX, append_trace, layer_edit, now_str
 
 # 三档（设计稿第二节）
 AUTO, ASK, READ = "auto", "ask", "read"
@@ -1105,15 +1102,8 @@ def _trace(name: str, args: dict, ok: bool, detail: str,
     打开了哪些页面。它们不在 `args` 里（`args` 是她给的），
     也不该被 `detail` 的截断吃掉，所以单独一个字段。
     """
-    try:
-        trace_dir = cfgmod.abspath(cfgmod.PATHS["trace_dir"])
-        trace_dir.mkdir(parents=True, exist_ok=True)
-        path = trace_dir / f"工具-{datetime.now().strftime('%Y%m%d')}.jsonl"
-        record = {"ts": now_str(), "tool": name, "args": args,
-                  "ok": bool(ok), "detail": _clip(detail, 200)}
-        if extra:
-            record["extra"] = extra
-        with open(path, "a", encoding="utf-8") as f:
-            f.write(json.dumps(record, ensure_ascii=False) + "\n")
-    except Exception as e:
-        print(f"[tools] 工具留痕失败（不影响结果）: {e}")
+    record = {"ts": now_str(), "tool": name, "args": args,
+              "ok": bool(ok), "detail": _clip(detail, 200)}
+    if extra:
+        record["extra"] = extra
+    append_trace("工具", record)

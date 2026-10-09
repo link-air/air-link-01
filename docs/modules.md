@@ -96,7 +96,7 @@
 
 - **class `App`** — 跨请求共享的状态。HTTP 是多线程的，所以会话拿锁保护。
 - 　· `session(self) -> ChatSession` — 懒建会话：第一次说话时才建，这样启动仪表盘不会先花一次 LLM 调用。
-- 　· `chat(self, msg) -> dict` — 走完整链路回一句话（**加锁**）。
+- 　· `chat(self, msg) -> dict` — 走完整链路回一句话（**加锁**）——非流式，流式那版是 `chat_stream`。
 - 　· `speak(self, text, voice) -> dict` — 把一段话交给**本地语音服务**，拿回音频（打包成 data URI 给页面）。
 - 　· `speak_stream(self, text, voice)` — 流式版播报：**把语音服务的 PCM 帧原样转给页面**。
 - 　· `voice(self) -> dict` — 她的声音：**基底音色 + 微调刻度 + 那句手写描述**。**他定的**，存 `user_prefs`。
@@ -106,7 +106,6 @@
 - 　· `voice_stop(self) -> dict` — 关掉语音服务（**放掉显存**）——让它自己退（`/shutdown`），不是外面硬杀。
 - 　· `voice_config(self) -> dict` — 读语音服务的配置（`tts/voice.json`）+ 本地可选的模型清单。
 - 　· `voice_config_save(self, patch) -> dict` — 写回 `tts/voice.json` 的**白名单字段**（合并 + 原子替换）。
-- 　· `pending_view(self) -> dict | None` — 她在等什么（界面拿它弹确认条）。**不触发建会话**——没有会话就是没有。
 - 　· `confirm(self, action) -> dict` — 他点了确认条上的动作（`delete` / `archive` / `keep` / `accept`）——
 - 　· `undo_turns(self, turns, expect) -> dict` — 撤掉窗口末尾的 N 轮（改与重新生成的前半步，见 `ShortTerm.undo_turns`）。
 - 　· `chat_stream(self, msg)` — 流式：**和非流式用同一把锁**——窗口是串行的，对话本来就是一句一句来。
@@ -176,7 +175,7 @@
 |---|---|
 | 层级 · Layer | L2 外部服务（向量） |
 | 上游 · Upstream | config（在 `chat.build_embedding` 里读） |
-| 下游 · Downstream | scene（算检索向量）、recall（算查询向量与相似度）、 distill / trend / weave / tools / salvage（凡要论相似的地方） |
+| 下游 · Downstream | scene（算检索向量）、recall（算查询向量与相似度）、chat（建服务）、 memo / settings（测试连接）、distill / trend / weave / tools / salvage |
 | 对外入口 · Entry points | `EmbeddingService`（`embed` / `embed_one` / `degraded`）、 `cosine` / `embedding_novelty` |
 | 边界 · Boundary | **失败一律返回 None，不抛**——降级与否由调用方决定怎么兜 |
 
@@ -196,7 +195,7 @@
 |---|---|
 | 层级 · Layer | L4 写入侧（实体） |
 | 上游 · Upstream | model（Scene） |
-| 下游 · Downstream | distill（写入时挂索引）、recall（读取时的实体旁路） |
+| 下游 · Downstream | distill（写入时挂索引）、recall（读取时的实体旁路）、salvage（重记时重新挂） |
 | 对外入口 · Entry points | `link_entities`、`match_known_entities`、`recall_by_entities` |
 | 边界 · Boundary | 不管"什么名字才算同一个"的语义判断（精确匹配在 `store.find_entity`） |
 
@@ -238,7 +237,7 @@ LLM 调用——**结构化输出 + 重试 + 失败降级**。
 |---|---|
 | 层级 · Layer | L8 备忘录 |
 | 上游 · Upstream | config、model、prompts、store（CRUD 在那边） |
-| 下游 · Downstream | distill（`_write_memos` 与 `memo_cycle`）、recall（`standing_memos`）、 shortterm（`judge_hits`）、chat（`mark_raised`、到点那件的记账） |
+| 下游 · Downstream | distill（`_write_memos` 与 `memo_cycle`）、recall（`standing_memos`）、 shortterm（`judge_hits`）、chat（`mark_raised`、到点那件的记账）、 tools（`close`，延迟 import）、dashboard（`close` / `due`） |
 | 对外入口 · Entry points | `due` / `standing_memos` / `judge_hits` / `hit_candidates` / `retire_due` / `memo_cycle` |
 | 边界 · Boundary | **不认识对话层**——它只回答"哪些到点了、哪些该退役了"； 注不注入、怎么说是 recall / chat 的事 |
 
@@ -300,7 +299,7 @@ LLM 调用——**结构化输出 + 重试 + 失败降级**。
 |---|---|
 | 层级 · Layer | L2 外部服务（出站网络）——所有网络调用的公共底座 |
 | 上游 · Upstream | 标准库 urllib（无项目内依赖） |
-| 下游 · Downstream | llm / embedding / dashboard（经全局 opener）、webfetch（proxied） |
+| 下游 · Downstream | core/__init__（import 即装）、settings（保存时重装）、embedding（走 `open()`）、 webfetch（`proxied`）；llm / 语音客户端经全局 opener 受益（不 import 它） |
 | 对外入口 · Entry points | `install()` / `open()` / `proxied()` / `is_loopback()` |
 | 边界 · Boundary | **只做"走哪条路"**——超时 / 重试 / 证书 / 上限各自在调用方， 这里不替它们做主 |
 
@@ -384,7 +383,7 @@ LLM 调用——**结构化输出 + 重试 + 失败降级**。
 |---|---|
 | 层级 · Layer | L7 读取侧（唤醒） |
 | 上游 · Upstream | config、embedding、entity（旁路）、model、prompts（线索判定）、store |
-| 下游 · Downstream | chat（每轮唯一入口）、dashboard（把线索和抑制名单画出来）、 distill / shortterm（延迟 import `core_score` 与 `bump_counters`） |
+| 下游 · Downstream | chat（每轮唯一入口）、dashboard（把线索和抑制名单画出来）、 demo / run_experiment（直接调）、scene / distill / memo / salvage / tools （延迟 import `char_overlap` / `core_score` / `bump_counters`） |
 | 对外入口 · Entry points | `recall_for_message`（一个函数走完全程）/ `compute_cues` / `recall` / `core_score` / `rank` / `mark_mentioned` / `cue_hits`（给前端算高亮） / `cue_votes`（票制：强 2 / 弱 1，2026-10-05） |
 | 边界 · Boundary | **读取侧**——唯一会写的是两个计数器，且由调用方判断该不该记 |
 
@@ -433,7 +432,7 @@ LLM 调用——**结构化输出 + 重试 + 失败降级**。
 |---|---|
 | 层级 · Layer | L4 写入侧（切分与抽取） |
 | 上游 · Upstream | config、embedding（距离）、model、prompts（抽字段的 prompt 与 schema） |
-| 下游 · Downstream | shortterm（什么时候该切）、distill（它来调这一层的抽取） |
+| 下游 · Downstream | shortterm（什么时候该切，并从这取 `Message` 契约）、 distill（它来调这一层的抽取）、salvage（照原文重记） |
 | 对外入口 · Entry points | `should_cut` / `should_cut_texts`（降级版）/ `extract_scene` / `render_conversation` / `behavior_intensity` / `is_trivial` |
 | 边界 · Boundary | **不落库**。它给出"这一段是一张什么卡"，写是 distill 的事 |
 
@@ -497,7 +496,7 @@ LLM 调用——**结构化输出 + 重试 + 失败降级**。
 |---|---|
 | 层级 · Layer | L6 短期记忆 |
 | 上游 · Upstream | config、distill（提取就是 `distill_step1`）、scene（判寒暄与切分）、store |
-| 下游 · Downstream | chat / demo（每轮结束后调 `flush_if_needed`） |
+| 下游 · Downstream | chat / demo（每轮结束后调 `flush_if_needed`）、dashboard（`ShortTerm`） |
 | 对外入口 · Entry points | `ShortTerm`（写 `append` / 判 `flush_if_needed` / 渲染 `build_window` · `build_window_blocks` / 收尾 `end_session` · `clear_digest` / 撤销 `undo_turns` / 回执 `take_closed_memo` / 回填 `read_state`） + `estimate_tokens` |
 | 边界 · Boundary | **不自己写长期记忆**——它只决定"该提取了"，写是 `distill` 的事 （例外：`append` 里那次 `memo.judge_hits`，所以那处用了延迟 import） |
 
@@ -511,7 +510,7 @@ LLM 调用——**结构化输出 + 重试 + 失败降级**。
 - 　· `should_extract(self) -> bool` — 四条触发，任一成立就该提取。
 - 　· `turns_no_cut(self) -> int` — 距上一次话题切换的轮数（一轮 ≈ 一条 user + 一条 air）。
 - 　· `window_tokens(self) -> int` — 窗口当前占多少 token（预算触发的输入）。
-- 　· `session_idle(self) -> bool` — 按空闲时长判「会话已结束」（默认 30 分钟无消息）。
+- 　· `session_idle(self) -> bool` — 他隔了很久才回来说话 → 上一段算「会话已结束」（默认 30 分钟，`session_idle_min`）。
 - 　· `end_session(self) -> None` — 显式结束会话（触发提取最后一段，不然尾巴丢了）。
 - 　· `clear_digest(self) -> None` — 把压缩摘要也清掉（「新对话」用）。
 - 　· `build_window(self) -> str` — 渲染要注入的短期记忆：**最近 N 条逐字 + 更早的一行一条**。
@@ -530,13 +529,15 @@ SQLite 存储封装——**唯一的落库出口**。
 | 层级 · Layer | L1 存储层 |
 | 上游 · Upstream | config（路径与容量参数）、model（数据模型与序列化） |
 | 下游 · Downstream | 除 L0 外几乎全部——它是**唯一落库出口** |
-| 对外入口 · Entry points | `Store` 类；`now_str`（全项目的时间源）、`atomic_write_json`、 `RAW_HEAD`（原文文档的小节标题判据——写与读共用，salvage 也认它） |
+| 对外入口 · Entry points | `Store` 类；`now_str`（全项目的时间源）、`atomic_write_json`、 `append_trace`（留痕的唯一写法）、`scene_ids`（sources 里的 S1）、 `RAW_HEAD`（原文文档的小节标题判据——写与读共用，salvage 也认它） |
 | 边界 · Boundary | 只管"怎么存"，不判断"该不该存"；不认识 scene/topic/profile 的业务含义 |
 
 **公开符号 · public API**
 
 - `atomic_write_json(path, data) -> None` — 原子替换地写一个 JSON 文件。
 - `now_str() -> str` — 当前时间戳（本地时间，秒精度）。全项目统一从这里取时间。
+- `append_trace(kind, record) -> None` — 往 `data/trace/<kind>-YYYYMMDD.jsonl` 追加留痕——**全项目 trace 的唯一写法**。
+- `scene_ids(ids) -> list[str]` — 从一组编号里挑出 S1 的——`sources` 的下钻口径（S2 是聚合、S3 是判断，
 - `layer_edit(sid) -> dict` — 某层的「改」规则（认不出前缀当 S1——**默认层兜底**而已；
 - `split_topics(raw) -> list[str]` — 把「她 / 他给的主题串」切成主题列表（逗号 / 顿号 / 分号 / 空格都认）。
 - `load_str_list(raw) -> list[str]` — 把一列 JSON 数组文本读成 `list[str]`（NULL / 坏值 → `[]`）。

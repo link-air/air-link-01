@@ -10,11 +10,12 @@
   2. **超 M 轮未切换**——防一段太长一直不提取。
   3. **窗口 token 超预算**——设计稿要求「按预算不按条数」：
      内容长度差异极大，按条数会失控。它只压**最老的一批**，保留尾部逐字。
-  4. **会话结束**——`end_session()`（界面上「新对话」/ 收尾走它，`chat.close()` 调）。
-     ⚠️ 空闲那条（`session_idle_min`，默认 30 分钟没消息）**当前判不出来**：判定挂在
-     `flush_if_needed` 里，而 `chat` 是**先 `append`（刷新 `_last_active`）再 flush**
-     ——那一刻的空闲时长恒为 0，只有"读文件后直接 flush"（测试里）才为真。
-     本轮只记不改（要改得把它挪到 `append` 之前，动的是 `chat` 的调用顺序）。
+  4. **会话结束**——两条到达方式：`end_session()`（界面上「新对话」/ 收尾走它，
+     `chat.close()` 调）与**空闲超时**（`session_idle_min`，默认 30 分钟没消息）。
+     空闲那条看的是「**他说这一句之前隔了多久**」：间隔在 `append` 里算好存下来
+     （2026-10-09 修）。此前它判的是"现在离最后一条消息多久"，而判定挂在
+     `flush_if_needed`、flush 又在 append 之后——那一刻的间隔恒为 0，这条触发
+     因此在真实链路里从没生效过（L6 核对文档记过这个「发现未改」）。
 
 第 3 条和另外三条的语义差别，是这份实现里唯一需要留神的地方：
 预算触发时对话**还在继续**（只压最老一批），其余三种是**这段结束了**（整段提取）。
@@ -33,7 +34,7 @@
 # 模块速查
 #   层级    ：L6 短期记忆
 #   上游    ：config、distill（提取就是 `distill_step1`）、scene（判寒暄与切分）、store
-#   下游    ：chat / demo（每轮结束后调 `flush_if_needed`）
+#   下游    ：chat / demo（每轮结束后调 `flush_if_needed`）、dashboard（`ShortTerm`）
 #   对外入口：`ShortTerm`（写 `append` / 判 `flush_if_needed` / 渲染 `build_window` ·
 #             `build_window_blocks` / 收尾 `end_session` · `clear_digest` /
 #             撤销 `undo_turns` / 回执 `take_closed_memo` / 回填 `read_state`）
@@ -45,14 +46,13 @@ from __future__ import annotations
 
 import json
 import re
+from datetime import datetime
 
 from . import config as cfgmod
 from .distill import distill_step1, write_skip_trace
 from .prompts import rel_day, rel_stamp
-from .scene import is_trivial, should_cut, should_cut_texts
+from .scene import Message, is_trivial, should_cut, should_cut_texts
 from .store import atomic_write_json, now_str
-
-Message = dict
 
 _DIGEST_HEAD_RE = re.compile(r"^〔(\d{4}-\d{2}-\d{2}(?: \d{2}:\d{2})?)")
 
@@ -116,7 +116,10 @@ class ShortTerm:
         self.digest: list[str] = []
         self._emb_window: list[list[float]] = []   # 消息向量（判 should_cut）
         self._pending_cut = False             # append 时判出的话题切换
-        self._last_active = ""                # 最后活动时刻（判会话空闲）
+        self._last_active = ""                # 最后活动时刻（算间隔的基准）
+        # 他说这一句**之前**隔了多少分钟（`append` 里算，判「会话空闲」）。
+        # 不随窗口落盘：下次开口时从 `_last_active` 现算，正好覆盖"关掉程序隔天再聊"。
+        self._idle_before = 0.0
         self._budget_hit = False              # 本次触发是否来自预算
         self.last_closed_memo = None          # 上一条消息了结的 memo 编号（`take_closed_memo` 取走）
         self._load()
@@ -153,6 +156,12 @@ class ShortTerm:
         if interrupted:
             msg["interrupted"] = True
         self.messages.append(msg)
+        # 「这一句之前隔了多久」——**必须在刷新 `_last_active` 之前算**：这一句自己
+        # 会把时间戳推到"现在"，之后再算永远是 0。**只认他说的那一句**：她的回话
+        # 紧跟其后成对入窗（`chat` 是 user / air 连着 append），连它也更新的话，
+        # 刷出来的间隔又变回 0 —— 等于没算。
+        if (speaker or "user") == "user" and self._last_active:
+            self._idle_before = self._minutes_between(self._last_active, msg["ts"])
         self._last_active = msg["ts"]
 
         # 本条**命中**了哪几件未了结的事、各是什么动作（2026-10-05：命中判定，
@@ -260,11 +269,19 @@ class ShortTerm:
         """四条触发，任一成立就该提取。"""
         if not self.messages:
             return False
+        return (self._other_triggers()
+                or self.window_tokens() > cfgmod.cfg("shortterm", "token_budget", default=4000))
+
+    def _other_triggers(self) -> bool:
+        """除「预算」之外的三条触发（话题切换 / 超轮数 / 会话空闲）。
+
+        单独一个方法，是因为「只压最老一批」的判断（`compress_and_extract`
+        的 `budget_only`）要的正是"**只有预算这一条成立**"——这份清单分两处写，
+        将来加第五条触发时，那处会静默漏判（压整段还是压一批，从此不一致）。
+        """
         if self._pending_cut:
             return True
         if self.turns_no_cut() >= cfgmod.cfg("shortterm", "max_turns_no_cut", default=30):
-            return True
-        if self.window_tokens() > cfgmod.cfg("shortterm", "token_budget", default=4000):
             return True
         return self.session_idle()
 
@@ -281,16 +298,27 @@ class ShortTerm:
                 + sum(estimate_tokens(m.get("text", "")) for m in self.messages))
 
     def session_idle(self) -> bool:
-        """按空闲时长判「会话已结束」（默认 30 分钟无消息）。"""
-        if not self._last_active:
-            return False
-        from datetime import datetime, timedelta
-        try:
-            last = datetime.strptime(self._last_active, "%Y-%m-%d %H:%M:%S")
-        except ValueError:
-            return False
-        return datetime.now() - last > timedelta(
-            minutes=cfgmod.cfg("shortterm", "session_idle_min", default=30))
+        """他隔了很久才回来说话 → 上一段算「会话已结束」（默认 30 分钟，`session_idle_min`）。
+
+        看的是**这一句之前的那段间隔**（`append` 时算好，见那里的注释），不是
+        "现在离最后一条消息多久"——判定挂在 `flush_if_needed`，而 flush 在
+        `append` 之后，后者算出来的永远是 0。**解析不出时间戳 = 不算空闲**
+        （宁可不切，也不凭空切一段）。
+        """
+        return self._idle_before >= cfgmod.cfg("shortterm", "session_idle_min", default=30)
+
+    @staticmethod
+    def _minutes_between(older: str, newer: str) -> float:
+        """两个时间戳之间隔了多少分钟（解析不了给 0——**不猜**；负数按 0 算）。"""
+        for fmt, cut in (("%Y-%m-%d %H:%M:%S", 19), ("%Y-%m-%d %H:%M", 16),
+                         ("%Y-%m-%d", 10)):
+            try:
+                a = datetime.strptime((older or "")[:cut], fmt)
+                b = datetime.strptime((newer or "")[:cut], fmt)
+            except ValueError:
+                continue
+            return max(0.0, (b - a).total_seconds() / 60.0)
+        return 0.0
 
     def end_session(self) -> None:
         """显式结束会话（触发提取最后一段，不然尾巴丢了）。"""
@@ -408,10 +436,7 @@ class ShortTerm:
         if not self.messages:
             return None
 
-        budget_only = (self._budget_hit
-                       and not self._pending_cut
-                       and self.turns_no_cut() < cfgmod.cfg("shortterm", "max_turns_no_cut", default=30)
-                       and not self.session_idle())
+        budget_only = self._budget_hit and not self._other_triggers()
         keep = int(cfgmod.cfg("shortterm", "verbatim_messages", default=4))
         if budget_only and len(self.messages) > keep:
             # 预算触发：对话还在继续，只压最老的一批，尾部逐字留着
@@ -432,6 +457,7 @@ class ShortTerm:
             self._emb_window = self._emb_window[-len(rest):] if rest else []
             self._pending_cut = False
             self._budget_hit = False
+            self._idle_before = 0.0
             self._save()
             return {"scene_id": "", "skipped": True,
                     "reason": "纯寒暄 / 纯应答（代码判定，没花 LLM）",
@@ -452,6 +478,7 @@ class ShortTerm:
             self._emb_window = self._emb_window[-len(rest):] if rest else []
             self._pending_cut = False
             self._budget_hit = False
+            self._idle_before = 0.0
             self._save()
             return {"scene_id": "", "skipped": True,
                     "reason": "只有被叫停的半句（代码判定，没花 LLM）",
@@ -474,6 +501,7 @@ class ShortTerm:
         self._emb_window = self._emb_window[-len(rest):] if rest else []
         self._pending_cut = False
         self._budget_hit = False
+        self._idle_before = 0.0
         self._save()
 
         if scene is None:

@@ -1,9 +1,9 @@
 ' =============================================================
 '  ASCII alias for the desktop on/off switch (double-click me).
 '
-'  The canonical switch is the Chinese-named `开关.hta` next to
-'  this file -- a tiny window with two buttons: "bring everything
-'  up" (= 启动.vbs / start.vbs) and "quit gracefully" (= Settings
+'  The canonical switch is the Chinese-named .hta next to this
+'  file -- a tiny window with two buttons: "bring everything
+'  up" (= the launcher / start.vbs) and "quit gracefully" (= Settings
 '  -> Quit all: voice service first, then the dashboard).
 '
 '  This alias just opens that .hta with mshta. Same reason as
@@ -18,7 +18,7 @@ Set fso = CreateObject("Scripting.FileSystemObject")
 
 root = fso.GetParentFolderName(WScript.ScriptFullName) & "\"
 
-' U+5F00 U+5173 = "开关"  ->  "开关.hta"
+' U+5F00 U+5173 = the two CJK characters  ->  "<name>.hta"
 target = ChrW(&H5F00) & ChrW(&H5173) & ".hta"
 
 If Not fso.FileExists(root & target) Then

@@ -39,7 +39,8 @@ if not defined PY (
 if /i "%~1"=="test" (
     "%PY%" -m unittest discover -s tests -v
 ) else if /i "%~1"=="exp" (
-    rem 实验脚本自备（仓库不带素材）：run.cmd exp private\实验\example_profile.json
+    rem Experiment scripts are yours to supply (not shipped) -- they live
+    rem under private\ ; usage:  run.cmd exp private\<script>.json
     "%PY%" run_experiment.py --script "%~2" --fresh
 ) else if /i "%~1"=="ui" (
     "%PY%" -m core.dashboard

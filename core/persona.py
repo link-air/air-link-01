@@ -28,14 +28,12 @@
 # ---------------------------------------------------------------------
 from __future__ import annotations
 
-import json
 import os
 import re
-from datetime import datetime
 from pathlib import Path
 
 from . import config as cfgmod
-from .store import now_str
+from .store import append_trace, now_str
 
 # id（= 文件名）的字符集。**不是审美**：它会写进原文署名（`air: …`），
 # `salvage._split_dialogue` 认行首 `名字:`——中文 / 冒号 / 空格进去就把原文解析弄坏。
@@ -148,17 +146,10 @@ def write_persona_trace(act: str, name: str, before: str = "",
     单条记忆丢了还能从原文找回来，人格被改坏了没有第二处副本（git 那份要他会用）。
     写不成不拦改动本身（同各处 trace 的兜底）。
     """
-    try:
-        trace_dir = cfgmod.abspath(cfgmod.PATHS["trace_dir"])
-        trace_dir.mkdir(parents=True, exist_ok=True)
-        path = trace_dir / f"人格-{datetime.now().strftime('%Y%m%d')}.jsonl"
-        rec = {"ts": now_str(), "act": act, "id": name, "note": note}
-        if before:
-            rec["before"] = before
-        with open(path, "a", encoding="utf-8") as f:
-            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
-    except Exception as e:
-        print(f"[persona] 人格留痕失败（不影响改动本身）: {e}")
+    rec = {"ts": now_str(), "act": act, "id": name, "note": note}
+    if before:
+        rec["before"] = before
+    append_trace("人格", rec)
 
 
 def names(include_disabled: bool = False) -> list[str]:

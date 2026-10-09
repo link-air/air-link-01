@@ -268,7 +268,9 @@ CONFIG = {
         "older_line_cap": 40,
         "token_budget": 4000,      # * 超此预算 → 压最老一批（触发提取的第四条）
         "max_turns_no_cut": 30,    # * 超多少轮未切换则强制提取（预算的兜底）
-        "session_idle_min": 30,    # * 空闲多少分钟算会话结束
+        "session_idle_min": 30,    # * 他说这一句之前隔多少分钟算「上一段已结束」
+        #                             （判在 `append` 时——那时的间隔才是真的，见
+        #                             `ShortTerm.session_idle`）
     },
     "memo": {                      # 备忘录
         # * 默认周期（天）。`followup`（要过几天看结果的，2026-09-22 加）给 4：

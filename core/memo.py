@@ -51,7 +51,8 @@ memo 不需要独立的记忆入口。
 #   层级    ：L8 备忘录
 #   上游    ：config、model、prompts、store（CRUD 在那边）
 #   下游    ：distill（`_write_memos` 与 `memo_cycle`）、recall（`standing_memos`）、
-#             shortterm（`judge_hits`）、chat（`mark_raised`、到点那件的记账）
+#             shortterm（`judge_hits`）、chat（`mark_raised`、到点那件的记账）、
+#             tools（`close`，延迟 import）、dashboard（`close` / `due`）
 #   对外入口：`due` / `standing_memos` / `judge_hits` / `hit_candidates` /
 #             `retire_due` / `memo_cycle`
 #   边界    ：**不认识对话层**——它只回答"哪些到点了、哪些该退役了"；
@@ -67,7 +68,7 @@ from .model import (MEMO_CLASSES, MEMO_PENDING, MEMO_RAISED, MEMO_TIMING_SOON,
                     MEMO_TIMINGS)
 from .prompts import (MEMO_CLASS_SCHEMA, MEMO_GROUP_SCHEMA, MEMO_HIT_SCHEMA,
                       memo_class_prompt, memo_group_prompt, memo_hit_prompt)
-from .store import now_str
+from .store import append_trace, now_str
 
 # ---------------------------------------------------------------------
 # 一、时间分类（只分类，不估天数）
@@ -366,16 +367,7 @@ def write_memo_trace(act: str, changes: list[dict]) -> None:
     界面层写，她判 / 她调工具那两条路同样要留下"为什么不再提了"的答案）。
     写不成不拦改动本身（同各处 trace 的兜底）。
     """
-    try:
-        trace_dir = cfgmod.abspath(cfgmod.PATHS["trace_dir"])
-        trace_dir.mkdir(parents=True, exist_ok=True)
-        path = trace_dir / f"备忘-{datetime.now().strftime('%Y%m%d')}.jsonl"
-        with open(path, "a", encoding="utf-8") as f:
-            for c in changes:
-                f.write(json.dumps({"ts": now_str(), "act": act, **c},
-                                   ensure_ascii=False) + "\n")
-    except Exception as e:
-        print(f"[memo] 备忘留痕失败（不影响改动本身）: {e}")
+    append_trace("备忘", [{"ts": now_str(), "act": act, **c} for c in changes])
 
 
 # ---------------------------------------------------------------------
@@ -390,15 +382,8 @@ def write_memo_trace(act: str, changes: list[dict]) -> None:
 # ---------------------------------------------------------------------
 
 def _minutes_ago(stamp: str, minutes: int) -> str:
-    """时间戳 - N 分钟（`_shift` 的反方向；解析不了返回空串——不猜）。"""
-    for fmt, cut in (("%Y-%m-%d %H:%M:%S", 19), ("%Y-%m-%d %H:%M", 16),
-                     ("%Y-%m-%d", 10)):
-        try:
-            t = datetime.strptime((stamp or "")[:cut], fmt)
-        except ValueError:
-            continue
-        return (t - timedelta(minutes=minutes)).strftime("%Y-%m-%d %H:%M:%S")
-    return ""
+    """时间戳 - N 分钟（解析不了返回空串——不猜）。"""
+    return _shift(stamp, minutes=-minutes)
 
 
 def hit_candidates(store, msg: str, emb=None, now: str | None = None) -> list:
@@ -606,8 +591,8 @@ def memo_cycle(store, llm, now: str | None = None) -> dict:
 # ---------------------------------------------------------------------
 
 
-def _shift(stamp: str, *, days: int = 0, hours: int = 0) -> str:
-    """时间戳 + N 天 / N 小时（字符串进、字符串出）。
+def _shift(stamp: str, *, days: int = 0, hours: int = 0, minutes: int = 0) -> str:
+    """时间戳 + N 天 / 小时 / 分钟（字符串进、字符串出；给负数就是往前算）。
 
     加法必须过 datetime（同 `store._add_days` 的理由：手写日期进位
     迟早错在月底和闰年上）。解析不了就返回空串——**不猜**。

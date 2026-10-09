@@ -39,13 +39,10 @@
 # ---------------------------------------------------------------------
 from __future__ import annotations
 
-import json
-from datetime import datetime
-
 from . import config as cfgmod
 from .embedding import cosine
 from .prompts import REVISION_SCHEMA, drift_prompt
-from .store import now_str
+from .store import append_trace, now_str
 
 
 # ---------------------------------------------------------------------
@@ -224,11 +221,4 @@ def _write_trace(record: dict) -> None:
     尤其这类「慢变化」——单看每一次检测都很平淡，
     但把几周的记录排起来就看得出「是一直在漂，还是抖了一下」。
     """
-    try:
-        trace_dir = cfgmod.abspath(cfgmod.PATHS["trace_dir"])
-        trace_dir.mkdir(parents=True, exist_ok=True)
-        path = trace_dir / f"漂移-{datetime.now().strftime('%Y%m%d')}.jsonl"
-        with open(path, "a", encoding="utf-8") as f:
-            f.write(json.dumps(record, ensure_ascii=False) + "\n")
-    except Exception as e:
-        print(f"[trend] 漂移留痕失败（不影响检测结果）: {e}")
+    append_trace("漂移", record)

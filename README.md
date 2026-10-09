@@ -161,7 +161,7 @@ python demo.py --real
 
 ```
 air-link-01/
-├── core/            24 个模块（每个头部一段「模块速查」；接口总表见 docs/modules.md）
+├── core/            24 个模块（除 `__init__.py` 外每个头部一段「模块速查」；接口总表见 docs/modules.md）
 ├── web/index.html   整个前端就这一个文件（零依赖，中 / 英词典内嵌）
 ├── self/personas/   人格文件（air / mia / xina）——文件是真源，界面只是编辑器
 ├── tests/           离线测试（模拟的大模型 + 模拟向量）

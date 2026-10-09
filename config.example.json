@@ -11,7 +11,7 @@
     "insecure_ssl": false
   },
   "search": {
-    "style": "anthropic"
+    "channel": "anthropic"
   },
   "_note": "配置模板：复制成 config.local.json 再填。留空 = 用默认值 / 环境变量（AIR_LINK_* 优先）。api_key 留空 = 不改动已有 key。"
 }

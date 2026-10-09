@@ -31,7 +31,7 @@
 # 模块速查
 #   层级    ：L4 写入侧（实体）
 #   上游    ：model（Scene）
-#   下游    ：distill（写入时挂索引）、recall（读取时的实体旁路）
+#   下游    ：distill（写入时挂索引）、recall（读取时的实体旁路）、salvage（重记时重新挂）
 #   对外入口：`link_entities`、`match_known_entities`、`recall_by_entities`
 #   边界    ：不管"什么名字才算同一个"的语义判断（精确匹配在 `store.find_entity`）
 # ---------------------------------------------------------------------

@@ -20,7 +20,8 @@
 #   层级    ：L7 读取侧（唤醒）
 #   上游    ：config、embedding、entity（旁路）、model、prompts（线索判定）、store
 #   下游    ：chat（每轮唯一入口）、dashboard（把线索和抑制名单画出来）、
-#             distill / shortterm（延迟 import `core_score` 与 `bump_counters`）
+#             demo / run_experiment（直接调）、scene / distill / memo / salvage / tools
+#             （延迟 import `char_overlap` / `core_score` / `bump_counters`）
 #   对外入口：`recall_for_message`（一个函数走完全程）/ `compute_cues` / `recall` /
 #             `core_score` / `rank` / `mark_mentioned` / `cue_hits`（给前端算高亮）
 #             / `cue_votes`（票制：强 2 / 弱 1，2026-10-05）
@@ -44,7 +45,7 @@ from .embedding import cosine
 from .entity import match_known_entities, recall_by_entities
 from .model import PROFILE_ESTABLISHED, Scene
 from .prompts import CUE_SCHEMA, cue_prompt
-from .store import now_str
+from .store import append_trace, now_str
 
 # R0 触发特征（第一版规则）。
 # 为什么用「特征词」而不是小模型：规则的可解释性在这里比准确率重要——
@@ -827,14 +828,7 @@ def write_trace(record: dict) -> None:
     不留痕就只能靠猜。同时它也是二期「向量持久化 / 渐变检测」的数据源——
     C1–C7 的每次取值都在里面，攒够了就是原始素材。
     """
-    try:
-        trace_dir = cfgmod.abspath(cfgmod.PATHS["trace_dir"])
-        trace_dir.mkdir(parents=True, exist_ok=True)
-        path = trace_dir / f"唤醒-{datetime.now().strftime('%Y%m%d')}.jsonl"
-        with open(path, "a", encoding="utf-8") as f:
-            f.write(json.dumps(record, ensure_ascii=False) + "\n")
-    except Exception as e:
-        print(f"[recall] trace 写入失败（不影响唤醒结果）: {e}")
+    append_trace("唤醒", record)
 
 
 # 他是不是在追问一个指代（2026-09-21，设计稿 F 条）。

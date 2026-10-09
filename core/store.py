@@ -30,11 +30,12 @@ sqlite3 的连接跨线程用会直接报 `ProgrammingError`——而仪表盘�
 #   上游    ：config（路径与容量参数）、model（数据模型与序列化）
 #   下游    ：除 L0 外几乎全部——它是**唯一落库出口**
 #   对外入口：`Store` 类；`now_str`（全项目的时间源）、`atomic_write_json`、
+#             `append_trace`（留痕的唯一写法）、`scene_ids`（sources 里的 S1）、
 #             `RAW_HEAD`（原文文档的小节标题判据——写与读共用，salvage 也认它）
 #   边界    ：只管"怎么存"，不判断"该不该存"；不认识 scene/topic/profile 的业务含义
 # ---------------------------------------------------------------------
 # 本文件分段
-#   段 0  模块函数（在类外）—— atomic_write_json / 原文分节解析
+#   段 0  模块函数（在类外）—— atomic_write_json / append_trace / scene_ids / 原文分节解析
 #   段 1  Store.__init__ / 连接 / 建表 —— 启动与自检（损坏不覆盖）
 #   段 2  备份 —— backup_daily（每日一份，留 7 天）
 #   段 3  S1 场景卡 CRUD + 计数器 + 全量向量
@@ -83,7 +84,8 @@ def atomic_write_json(path: Path, data) -> None:
       - 退避重试：Windows 上有人正打开着目标文件时 replace 会直接拒绝访问，
         这是瞬时冲突（实测稳定复现），重试即可。
 
-    这里只用来落短期窗口（`data/shortterm.json`）。
+    调用点不止短期窗口：`shortterm` 落窗口（`data/shortterm.json`）、`settings` 写
+    `config.local.json`、`dashboard` 写语音配置——凡是「写坏就丢东西」的 JSON 都走它。
     """
     p = str(path)
     tmp = f"{p}.{os.getpid()}.{secrets.token_hex(4)}.tmp"
@@ -117,6 +119,28 @@ def now_str() -> str:
     也是要跟用户说的「上周三」对得上的——本地时间才对得上。
     """
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def append_trace(kind: str, record) -> None:
+    """往 `data/trace/<kind>-YYYYMMDD.jsonl` 追加留痕——**全项目 trace 的唯一写法**。
+
+    为什么收在这里：文件名前缀 `kind` 就是仪表盘分派渲染的键
+    （`dashboard.App.trace` 按它认这条记录该长什么样），日期决定"同一天一份"——
+    两样都不能各模块各写一遍，写歪一处就是「应该有但没显示」那类故障。
+    `record` 给一条 dict，或给一列 dict（一次写多行，如批量改动）。
+
+    **永不抛**：留痕失败不拦它记录的那个动作本身。
+    """
+    try:
+        trace_dir = cfgmod.abspath(cfgmod.PATHS["trace_dir"])
+        trace_dir.mkdir(parents=True, exist_ok=True)
+        path = trace_dir / f"{kind}-{datetime.now().strftime('%Y%m%d')}.jsonl"
+        rows = record if isinstance(record, list) else [record]
+        with open(path, "a", encoding="utf-8") as f:
+            for r in rows:
+                f.write(json.dumps(r, ensure_ascii=False) + "\n")
+    except Exception as e:
+        print(f"[store] {kind}留痕失败（不影响流程）: {e}")
 
 
 # 原文文档的小节标题（`## S1-0003 · 2026-09-13 09:30:00`）——**只有它算切分点**。
@@ -360,6 +384,13 @@ _ID_PREFIX = {
     "profile_reviews": "PR",
     # （`openings`: "OP" 随主动开口一起删，2026-10-05 晚）
 }
+
+
+def scene_ids(ids) -> list[str]:
+    """从一组编号里挑出 S1 的——`sources` 的下钻口径（S2 是聚合、S3 是判断，
+    都不是直接素材）。放这里是因为它认的正是上面那张前缀表。"""
+    return [i for i in (ids or []) if str(i).startswith(_ID_PREFIX["scenes"])]
+
 
 # 场景**可改字段**的白名单与中文名（2026-09-24，工具箱稿 §七）——留痕 / 界面 / 工具共用一份。
 #
