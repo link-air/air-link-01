@@ -158,7 +158,7 @@ python demo_distill.py          # stage 2: aggregate → abstract → corroborat
 python demo_memo.py             # stage 3: due → injected once → hit judged → retired
 python demo_trend.py            # stage 4: drift detection (numbers moved ≠ the person changed)
 python run_experiment.py --script your_script.json --fresh   # dialogue replay + report
-python -m unittest discover -s tests                        # 629 tests, offline (mock LLM + embeddings)
+python -m unittest discover -s tests                        # 634 tests, offline (mock LLM + embeddings)
 ```
 
 - **The workbench**: chat on the left; on the right, this turn's cues, actions, recall (with the

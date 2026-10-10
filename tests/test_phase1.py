@@ -573,6 +573,113 @@ class TestShortTerm(Base):
         self.assertTrue(st.session_idle())
         self.assertTrue(st.should_extract())
 
+    def test_idle_extract_keeps_the_new_turn(self):
+        """空闲只切「上一段」：新段的第一轮留在窗口里（2026-10-11）。
+
+        场景就是真实踩到的那个：隔了很久回来说一句、聊完——若把这一轮也收走，
+        「重新生成」点下去只能得到"窗口是空的"（它已经进长期库了）。
+        """
+        st = ShortTerm(self.store, scripted_llm(), emb_service=None,
+                       session_id="t", state_path=self.root / "st.json")
+        st.append("user", "第一句", ts="2026-01-01 10:00:00")
+        st.append("air", "嗯", ts="2026-01-01 10:00:05")
+        st.append("user", "第二句", ts="2026-01-01 10:01:00")
+        st.append("air", "嗯嗯", ts="2026-01-01 10:01:05")
+        st.append("user", "隔了一小时才说的第三句", ts="2026-01-01 11:00:00")
+        st.append("air", "回来了", ts="2026-01-01 11:00:05")
+        self.assertTrue(st.session_idle(), "隔了一小时，算空闲")
+
+        info = st.flush_if_needed()
+        self.assertIsNotNone(info, "旧段该被提取")
+        self.assertEqual(self.store.count("scenes"), 1, "旧段落了场景卡")
+        self.assertTrue(st.digest, "旧段进了压缩摘要")
+        # 新段的第一轮（这条 user + 她的回话）留下 → 撤得动 / 重新生成得了
+        self.assertEqual([m["text"] for m in st.messages],
+                         ["隔了一小时才说的第三句", "回来了"])
+
+    def test_idle_without_old_segment_extracts_nothing(self):
+        """窗口里只有新段的第一轮 → 空闲触发无事可做（不白调 LLM，也不动窗口）。
+
+        这是那个坑的最纯形态：当天第一句话说出口、聊完就进长期库——
+        窗口里根本没有"上一段"可以切。
+        """
+        st = ShortTerm(self.store, scripted_llm(), emb_service=None,
+                       session_id="t", state_path=self.root / "st.json")
+        st.append("user", "上一段的尾巴", ts="2026-01-01 09:00:00")
+        st.append("air", "嗯", ts="2026-01-01 09:00:05")
+        st.messages = []          # 模拟旧段已被提取走（窗口清空、`_last_active` 还留着）
+        st.append("user", "隔天回来的第一句", ts="2026-01-02 10:00:00")
+        st.append("air", "嗯", ts="2026-01-02 10:00:05")
+        self.assertTrue(st.session_idle())
+
+        self.assertIsNone(st.flush_if_needed(), "没有旧段可收——不该提取")
+        self.assertEqual(len(st.messages), 2, "新段原封不动地留着")
+        self.assertEqual(self.store.count("scenes"), 0, "没有落任何场景")
+
+    def test_stacked_triggers_keep_the_new_turn(self):
+        """多条触发叠加（超预算 + 切换 + 空闲）：仍"只切旧段"（2026-10-11 复查）。
+
+        长消息把窗口灌到超预算，与旧段零重叠的收尾句在降级判据下又判成
+        切换、且隔了一小时——三条一起成立。初版把"预算未超"和"非切换"
+        当条件，这类叠加会退回整窗：刚聊完的一轮又被收走。
+        """
+        st = ShortTerm(self.store, scripted_llm(), emb_service=None,
+                       session_id="t", state_path=self.root / "st.json")
+        per = cfgmod.cfg("shortterm", "token_budget") // 3
+        for i in range(2):                       # 四条长消息：把窗口灌到超预算
+            st.append("user", "字" * per, ts=f"2026-01-01 10:0{i}:00")
+            st.append("air", "字" * per, ts=f"2026-01-01 10:0{i}:05")
+        st.append("user", "隔了一小时才说的这句", ts="2026-01-01 11:00:00")
+        st.append("air", "嗯", ts="2026-01-01 11:00:05")
+        self.assertGreater(st.window_tokens(), cfgmod.cfg("shortterm", "token_budget"))
+        self.assertTrue(st.session_idle())
+        self.assertTrue(st._pending_cut, "零重叠的收尾句还会被判成切换——这条就是三条叠加")
+
+        info = st.flush_if_needed()
+        self.assertIsNotNone(info, "旧段该被提取")
+        self.assertEqual([m["text"] for m in st.messages],
+                         ["隔了一小时才说的这句", "嗯"],
+                         "叠加触发也留住新段（不然「重新生成」又撤不动）")
+
+    def test_topic_switch_extracts_old_segment_only(self):
+        """话题切换也只切「上一段」——设计稿 §二：切换即提取上一段（2026-10-11）。
+
+        原来它跟"整段收"混在一起：新话题的第一轮被一起收走，刚聊完想改 /
+        重新生成就撤不动（与空闲那个坑同源）。
+        """
+        st = ShortTerm(self.store, scripted_llm(), emb_service=None,
+                       session_id="t", state_path=self.root / "st.json")
+        for i in range(2):
+            st.append("user", "字" * 300, ts=f"2026-01-01 10:0{i}:00")
+            st.append("air", "字" * 300, ts=f"2026-01-01 10:0{i}:05")
+        # 与前面零重叠 → 降级判据（无向量）必然判成切换；间隔很短，不沾空闲
+        st.append("user", "换个话题：明天要不要带伞", ts="2026-01-01 10:01:00")
+        st.append("air", "带吧", ts="2026-01-01 10:01:05")
+        self.assertTrue(st._pending_cut, "降级判据该把它判成话题切换")
+        self.assertFalse(st.session_idle(), "这条用例不沾空闲")
+
+        info = st.flush_if_needed()
+        self.assertIsNotNone(info, "旧段该被提取")
+        self.assertEqual([m["text"] for m in st.messages],
+                         ["换个话题：明天要不要带伞", "带吧"],
+                         "切换点之后的这一轮要留在窗口里")
+
+    def test_empty_window_end_session_does_not_leak(self):
+        """空窗时的收尾标记不许留到下一段会话（2026-10-11 复查）。
+
+        `end_session()` 时窗口空（上一轮刚被提取过，或「新对话」点得正好）——
+        flush 会早退；若标记不清理，它会跟着同一个实例留到新会话：
+        第一轮又被当"整窗收尾"提走，「重新生成」撤不动。
+        """
+        st = ShortTerm(self.store, scripted_llm(), emb_service=None,
+                       session_id="t", state_path=self.root / "st.json")
+        st.end_session()                 # 窗口空——没有尾巴可收
+        st.flush_if_needed()
+        st.append("user", "新一段的第一句", ts="2026-01-01 10:00:00")
+        st.append("air", "嗯", ts="2026-01-01 10:00:05")
+        self.assertIsNone(st.flush_if_needed(), "新会话第一轮不该被提取")
+        self.assertEqual(len(st.messages), 2, "窗口原封不动")
+
     def test_air_turns_are_buffered(self):
         """**air 自己的话也进缓冲**——记忆的对象是「这段互动」，不是「用户」。
 

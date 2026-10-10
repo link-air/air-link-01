@@ -9,16 +9,23 @@
      切场景和提取触发**是同一件事**，不引入新机制。
   2. **超 M 轮未切换**——防一段太长一直不提取。
   3. **窗口 token 超预算**——设计稿要求「按预算不按条数」：
-     内容长度差异极大，按条数会失控。它只压**最老的一批**，保留尾部逐字。
-  4. **会话结束**——两条到达方式：`end_session()`（界面上「新对话」/ 收尾走它，
-     `chat.close()` 调）与**空闲超时**（`session_idle_min`，默认 30 分钟没消息）。
+     内容长度差异极大，按条数会失控。它只压**最老的一批**，保留尾部逐字
+     （已知边界：窗口本身不足 `verbatim_messages` 条时无"最老一批"可压——整窗收）。
+  4. **会话结束**——两条到达方式，**提取范围不同**（2026-10-11 分开记）：
+     `end_session()`（界面上「新对话」/ 退出收尾，`chat.close()` 调）整窗收干净
+     （尾巴不能丢）；**空闲超时**（`session_idle_min`，默认 30 分钟没消息）
+     只切旧段——它宣告的是「**上一段**结束了」（同话题切换）。
      空闲那条看的是「**他说这一句之前隔了多久**」：间隔在 `append` 里算好存下来
      （2026-10-09 修）。此前它判的是"现在离最后一条消息多久"，而判定挂在
      `flush_if_needed`、flush 又在 append 之后——那一刻的间隔恒为 0，这条触发
      因此在真实链路里从没生效过（L6 核对文档记过这个「发现未改」）。
 
-第 3 条和另外三条的语义差别，是这份实现里唯一需要留神的地方：
-预算触发时对话**还在继续**（只压最老一批），其余三种是**这段结束了**（整段提取）。
+第 3 条和另外几条的语义差别，是这份实现里唯一需要留神的地方——它决定**提取范围**：
+预算触发是"对话**还在继续**"（只压最老一批）；**话题切换与空闲**都是"**上一段**
+结束了"（只切旧段、新段的第一轮留下，2026-10-11 修——设计稿 §二写的就是
+"切换即提取上一段"，实现却跟"整段收"混在一起，把刚聊完的那轮也收走，
+「重新生成」当场撤不动）；超轮兜底（没有切点时才轮到它）与显式收尾
+是"**这段该收了**"（整段提取）。
 
 提取时**有一条例外**（2026-10-07 定）：被叫停的半句（`interrupted`，「停止」
 那一路）**只活在窗口里，不进长期库**——滤在 `compress_and_extract`，
@@ -116,6 +123,9 @@ class ShortTerm:
         self.digest: list[str] = []
         self._emb_window: list[list[float]] = []   # 消息向量（判 should_cut）
         self._pending_cut = False             # append 时判出的话题切换
+        # 显式收尾（`end_session`：「新对话」/ 退出）——它和话题切换分开记，
+        # 因为**提取范围不同**：切换只切旧段，收尾要把整窗收干净（尾巴不能丢）。
+        self._explicit_end = False
         self._last_active = ""                # 最后活动时刻（算间隔的基准）
         # 他说这一句**之前**隔了多少分钟（`append` 里算，判「会话空闲」）。
         # 不随窗口落盘：下次开口时从 `_last_active` 现算，正好覆盖"关掉程序隔天再聊"。
@@ -262,7 +272,9 @@ class ShortTerm:
         if self._emb_window:
             del self._emb_window[-len(cut):]
         # 上一轮判出来的切换点跟着作废——这段要重说，不是要另起一段
+        # （`_explicit_end` 同理：撤销之后不该还留着"整窗收干净"的落法）
         self._pending_cut = False
+        self._explicit_end = False
         self._save()
         return {"ok": True, "turns": turns, "ts": user_msg.get("ts") or "",
                 "text": (user_msg.get("text") or ""),
@@ -278,17 +290,44 @@ class ShortTerm:
                 or self.window_tokens() > cfgmod.cfg("shortterm", "token_budget", default=4000))
 
     def _other_triggers(self) -> bool:
-        """除「预算」之外的三条触发（话题切换 / 超轮数 / 会话空闲）。
+        """除「预算」之外的几条触发（话题切换 / 显式收尾 / 超轮数 / 会话空闲）。
 
         单独一个方法，是因为「只压最老一批」的判断（`compress_and_extract`
         的 `budget_only`）要的正是"**只有预算这一条成立**"——这份清单分两处写，
         将来加第五条触发时，那处会静默漏判（压整段还是压一批，从此不一致）。
         """
-        if self._pending_cut:
-            return True
-        if self.turns_no_cut() >= cfgmod.cfg("shortterm", "max_turns_no_cut", default=30):
-            return True
-        return self.session_idle()
+        return (self._explicit_end or self._pending_cut
+                or self._too_many_turns() or self.session_idle())
+
+    def _too_many_turns(self) -> bool:
+        """超轮数兜底（防一段太长一直不提取）。"""
+        return self.turns_no_cut() >= cfgmod.cfg(
+            "shortterm", "max_turns_no_cut", default=30)
+
+    def _cut_at_last_turn(self) -> bool:
+        """切点在"最后一条 user"吗——是就只切旧段（2026-10-11）。
+
+        设计稿 §二的原话是"**切换即提取上一段**"，空闲说的也是"**上一段**
+        已结束"（`session_idle`）——两条都只切掉旧段，最后一条 user 起的新段
+        留在窗口里（才撤得动 / 重新生成得了）。原来它们跟"整段收"混在一起，
+        把刚聊完的那一轮也收走。
+        只有**显式收尾**（`_explicit_end`：尾巴不能丢）与"没有切点的超轮兜底"
+        走整窗；预算有自己的"压最老一批"，与它叠加时同样不退整窗
+        （复查时修的变体：初版把预算当排除项，叠加时刚聊完的一轮又会被收走）。
+        """
+        if self._explicit_end:
+            return False
+        return self._pending_cut or self.session_idle()
+
+    def _last_user_index(self) -> int:
+        """最后一条 user 消息的下标（新段从哪一条起）。
+
+        找不到（窗口里全是她的回话——理论上不会有）给 0，调用方按"没有新段"处理。
+        """
+        for i in range(len(self.messages) - 1, -1, -1):
+            if (self.messages[i].get("speaker") or "user") == "user":
+                return i
+        return 0
 
     def turns_no_cut(self) -> int:
         """距上一次话题切换的轮数（一轮 ≈ 一条 user + 一条 air）。"""
@@ -326,8 +365,16 @@ class ShortTerm:
         return 0.0
 
     def end_session(self) -> None:
-        """显式结束会话（触发提取最后一段，不然尾巴丢了）。"""
-        self._pending_cut = True
+        """显式结束会话（触发提取**最后一段**——整窗收干净，不然尾巴丢了）。
+
+        与话题切换分开记（`_explicit_end` ≠ `_pending_cut`）：收尾是"这段到此
+        为止"，整窗收干净；切换只是"上一段完了"，新段要留在窗口里
+        （见 `_cut_at_last_turn`）。
+        窗口空 = **没有尾巴可收**：不置标记——它不落盘、`append` 也不重判，
+        留着会被**下一段会话**的 flush 读到（把新会话第一轮当"收尾"整窗收走）。
+        """
+        if self.messages:
+            self._explicit_end = True
 
     def clear_digest(self) -> None:
         """把压缩摘要也清掉（「新对话」用）。
@@ -433,10 +480,11 @@ class ShortTerm:
     # ---- 压缩 = 提取 ----
 
     def compress_and_extract(self) -> dict | None:
-        """窗口超限 / 话题切换 / 会话结束时调用：一次 LLM 调用，产出两侧。
+        """窗口超限 / 话题切换 / 会话结束（含空闲）时调用：一次 LLM 调用，产出两侧。
 
         返回值是给调用方记录用的摘要 dict（trace / demo 会打印），
-        没有可提取的内容时返回 None（**空窗口不该白调一次 LLM**）。
+        没有可提取的内容时返回 None（**空窗口不该白调一次 LLM**；话题切换 /
+        空闲而窗口里没有旧段可收时也走这条，见 `_cut_at_last_turn`）。
         """
         if not self.messages:
             return None
@@ -446,6 +494,16 @@ class ShortTerm:
         if budget_only and len(self.messages) > keep:
             # 预算触发：对话还在继续，只压最老的一批，尾部逐字留着
             oldest, rest = self.messages[:-keep], self.messages[-keep:]
+        elif self._cut_at_last_turn():
+            # 话题切换 / 空闲——它们说的是"**上一段**完了"（设计稿 §二：
+            # "切换即提取上一段"）：只切旧段，最后一条 user 起的新段留在窗口。
+            # 为什么必须留（2026-10-11 实测的坑）：全收的话，他刚聊完的那轮
+            # 立刻进长期库，「重新生成」点下去只剩一句"窗口是空的"——而那
+            # 恰恰是他最可能想改的一轮（刚生成的回复）。
+            cut = self._last_user_index()
+            if cut <= 0:
+                return None          # 窗口里只有新段的第一轮——没有旧段可收
+            oldest, rest = self.messages[:cut], self.messages[cut:]
         else:
             oldest, rest = self.messages, []
 
@@ -461,6 +519,7 @@ class ShortTerm:
             self.messages = rest
             self._emb_window = self._emb_window[-len(rest):] if rest else []
             self._pending_cut = False
+            self._explicit_end = False
             self._budget_hit = False
             self._idle_before = 0.0
             self._save()
@@ -482,6 +541,7 @@ class ShortTerm:
             self.messages = rest
             self._emb_window = self._emb_window[-len(rest):] if rest else []
             self._pending_cut = False
+            self._explicit_end = False
             self._budget_hit = False
             self._idle_before = 0.0
             self._save()
@@ -505,6 +565,7 @@ class ShortTerm:
         self.messages = rest
         self._emb_window = self._emb_window[-len(rest):] if rest else []
         self._pending_cut = False
+        self._explicit_end = False
         self._budget_hit = False
         self._idle_before = 0.0
         self._save()
@@ -578,9 +639,16 @@ class ShortTerm:
     def flush_if_needed(self) -> dict | None:
         """先判预算（设置 `_budget_hit` 供 compress 决定压多少），再决定提不提取。"""
         if not self.messages:
+            # 空窗没有可收的尾巴：收尾标记（`_explicit_end`）到此为止——
+            # 它是实例状态、不落盘，`append` 又不重判；留着会被**下一段会话**
+            # 的 flush 当成"还在收尾"，把新会话第一轮整窗收走。
+            self._explicit_end = False
             return None
+        # 超预算时标 `_budget_hit`（`compress_and_extract` 据此决定"压最老一批"）——
+        # 但这一轮判出了切换 / 收尾（`_pending_cut` / `_explicit_end`）就不标：
+        # 那次提取走的是它们的范围（切旧段 / 整窗），不是预算的"压最老"。
         if (self.window_tokens() > cfgmod.cfg("shortterm", "token_budget", default=4000)
-                and not self._pending_cut):
+                and not self._pending_cut and not self._explicit_end):
             self._budget_hit = True
         if not self.should_extract():
             return None

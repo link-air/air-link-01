@@ -511,12 +511,12 @@ LLM 调用——**结构化输出 + 重试 + 失败降级**。
 - 　· `turns_no_cut(self) -> int` — 距上一次话题切换的轮数（一轮 ≈ 一条 user + 一条 air）。
 - 　· `window_tokens(self) -> int` — 窗口当前占多少 token（预算触发的输入）。
 - 　· `session_idle(self) -> bool` — 他隔了很久才回来说话 → 上一段算「会话已结束」（默认 30 分钟，`session_idle_min`）。
-- 　· `end_session(self) -> None` — 显式结束会话（触发提取最后一段，不然尾巴丢了）。
+- 　· `end_session(self) -> None` — 显式结束会话（触发提取**最后一段**——整窗收干净，不然尾巴丢了）。
 - 　· `clear_digest(self) -> None` — 把压缩摘要也清掉（「新对话」用）。
 - 　· `build_window(self) -> str` — 渲染要注入的短期记忆：**最近 N 条逐字 + 更早的一行一条**。
 - 　· `build_window_blocks(self) -> list[tuple[str, str]]` — 窗口拆成**可分别丢弃的两块**：`[("更早", text), ("最近", text)]`。
 - 　· `gist_line(self, msg) -> str` — 一条消息降成一行：**由代码写，不叫模型写**。
-- 　· `compress_and_extract(self) -> dict | None` — 窗口超限 / 话题切换 / 会话结束时调用：一次 LLM 调用，产出两侧。
+- 　· `compress_and_extract(self) -> dict | None` — 窗口超限 / 话题切换 / 会话结束（含空闲）时调用：一次 LLM 调用，产出两侧。
 - 　· `flush_if_needed(self) -> dict | None` — 先判预算（设置 `_budget_hit` 供 compress 决定压多少），再决定提不提取。
 - 　· `read_state(path) -> dict` — 只读窗口文件，规整成 `{"session_id", "messages", "digest", "last_active"}`。
 

@@ -22,7 +22,7 @@ This file provides guidance to AI coding agents (CodeBuddy and others) working w
 | 命令 | 说明 |
 |---|---|
 | `python -m core.dashboard` | 主入口：本地记忆实验台（`127.0.0.1`）。Windows 双击 `run.cmd` 等价；`启动.vbs` = 仪表盘 + 语音、不开黑框 |
-| `python -m unittest discover -s tests` | 全量测试（629 个，约 40 秒，离线：mock LLM + mock 向量）。`run.cmd test` 是别名，CI 跑同一条 |
+| `python -m unittest discover -s tests` | 全量测试（634 个，约 40 秒，离线：mock LLM + mock 向量）。`run.cmd test` 是别名，CI 跑同一条 |
 | `python -m unittest discover -s tests -p "test_phase5.py"` | 只跑一个测试文件 |
 | `python -m unittest discover -s tests -k FrameConventionTest` | 只跑名字匹配的用例（`-k` 按类名 / 方法名过滤） |
 | `python demo.py` / `demo_distill.py` / `demo_memo.py` / `demo_trend.py` | 阶段 1–4 演示：假模型走同一条代码路径，不需要 key；`--fresh` 清演示库，`--real` 用真实服务 |

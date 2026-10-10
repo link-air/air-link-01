@@ -131,7 +131,7 @@ python demo_distill.py          # 阶段 2：聚合 → 抽象 → 印证 → �
 python demo_memo.py             # 阶段 3：备忘录 → 到点进注入 → 命中判定 → 退役
 python demo_trend.py            # 阶段 4：渐变检测（数字漂了 ≠ 人变了）
 python run_experiment.py --script 你的脚本.json --fresh     # 对话回放 + 报告（同一段可反复跑）
-python -m unittest discover -s tests                        # 629 个测试，离线（模拟的大模型 + 模拟向量）
+python -m unittest discover -s tests                        # 634 个测试，离线（模拟的大模型 + 模拟向量）
 ```
 
 - **实验台**：左边聊，右边实时显示这一轮的线索、动作、召回（含为什么）与抑制名单；下面标签页查库
