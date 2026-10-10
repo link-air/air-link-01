@@ -237,8 +237,8 @@ def standing_memos(store, msg: str = "", emb=None,
         "她手上没有"，不是"她没提"）。
 
     正常轮按需挑（成本恒定）：**到点 1 + 相关先挑满 + 最近补位（≤2）**，
-    去重后封顶 `limit`；`full=True`（他正**追问指代**，F 条）全列、封顶 8——
-    那一刻她要的是"认得出来"，不是"省着给"。
+    去重后封顶 `limit`；`full=True`（他正**追问指代**，F 条）全列、
+    封顶 `memo.standing_full_n`——那一刻她要的是"认得出来"，不是"省着给"。
 
     三个位子的判据（每一个都要说得出为什么）：
       - **到点**：见上（`due()` 已经算好"到没到"，这里只管挑）；
@@ -280,7 +280,7 @@ def standing_memos(store, msg: str = "", emb=None,
     if full:
         for m in opens:
             add(m, "追问")
-        return picked[:8]
+        return picked[:int(cfgmod.cfg("memo", "standing_full_n"))]
 
     # ① **到点的那一件**（2026-10-05 晚并栏：原来"候选 / 主动开口"两路并到这里）：
     # 未提过（`raised` 不进 `opens`）、同组也没提过才算——到点**不是"每轮可见"**，
@@ -538,6 +538,7 @@ def retire_due(store, now: str | None = None) -> list[dict]:
     now = now or now_str()
     grace = int(cfgmod.cfg("memo", "retire_grace_days", default=2) or 0)
     no_reply = int(cfgmod.cfg("memo", "retire_after_raised_days", default=3) or 0)
+    fallback_days = int(cfgmod.cfg("memo", "fallback_window_days"))
     out: list[dict] = []
     for m in store.open_memos():
         if m.status == MEMO_RAISED:
@@ -551,7 +552,7 @@ def retire_due(store, now: str | None = None) -> list[dict]:
             # 起点（2026-10-05 晚改）：`due_at`（他明说的时间）或 `created + window_days`。
             # 原来是 `raise_ready_at()`（时机表）——那张表已删，判据就这一条。
             start = ((m.due_at or "").strip()
-                     or _shift(m.created_at, days=m.window_days or 30))
+                     or _shift(m.created_at, days=m.window_days or fallback_days))
             deadline = _shift(start, days=grace) if start else ""
             why = f"提的窗口走完仍未提（{start} → {deadline}）"
         if not deadline or deadline > now:    # 时间戳格式统一，按字典序可比

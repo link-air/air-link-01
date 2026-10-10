@@ -42,7 +42,7 @@ from core.llm import LLM
 from core.model import Profile, Scene
 from core.prompts import SCENE_SCHEMA
 from core.recall import (bump_counters, char_overlap, compute_cues, core_score,
-                         cue_hits, cue_votes, multi_hit, profile_decay, rank, r0_should_recall,
+                         cue_hits, cue_votes, multi_hit, profile_decay, r0_should_recall,
                          recall, recall_for_message)
 from core.distill import distill_step1
 from core.scene import behavior_intensity, extract_scene, is_trivial, should_cut
@@ -807,14 +807,13 @@ class TestRecall(Base):
         self.assertLess(ids.index(both.id), ids.index(one.id),
                         "被语义 + 实体两条路捞到的先给（hits=2 > 1）")
 
-    def test_rank_does_not_favor_negative(self):
+    def test_score_does_not_favor_negative(self):
         """同等条件下，负效价场景不比正效价排得更前（不偏好负面）。"""
         common = dict(intensity=0.5, cited_by_profile=2, created_at="2026-09-01 10:00:00")
         neg = Scene(id="S1-0001", valence=-1, **common)
         pos = Scene(id="S1-0002", valence=1, **common)
         self.assertAlmostEqual(core_score(neg), core_score(pos), places=9,
                                msg="valence 不该进核心度")
-        self.assertEqual(len(rank([neg, pos])), 2)
 
     def test_cited_saturates_so_new_memory_can_compete(self):
         """被引用次数要饱和映射：否则一条老场景永远霸榜，新记忆上不来。"""

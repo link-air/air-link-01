@@ -356,11 +356,9 @@ def _build_opener(addresses: list[str] | None):
 
 def _headers() -> dict:
     return {
-        # 兜底值须与 `config.web.user_agent` 同值（只在配置键缺失时生效；
-        # 不一致即漂移——2026-09-25 复核把短版统一成了 config 的现值）
-        "User-Agent": str(cfgmod.cfg(
-            "web", "user_agent",
-            default="air-link-01/0.1 (local memory companion)") or ""),
+        # 单一来源：值只在 `config.web.user_agent` 写一份（原来这里抄了
+        # 同值兜底——config 一改就漂移，2026-10-10 收口）
+        "User-Agent": str(cfgmod.cfg("web", "user_agent") or ""),
         # 不发 Accept-Encoding：让服务器别压缩（省掉解压这一环）；
         # 真收到 gzip 也会解（有的服务器不看声明）。
         "Accept": "text/html,application/xhtml+xml,text/*;q=0.9,"
@@ -425,16 +423,15 @@ def fetch(url: str, *, opener=None, timeout=None, max_bytes=None,
     url = (url or "").strip()
     out = {"ok": False, "url": url, "final_url": "", "status": 0,
            "text": "", "truncated": False, "error": ""}
-    max_url_chars = int(max_url_chars
-                        or cfgmod.cfg("web", "max_url_chars", default=2048) or 2048)
+    # 四个上限只写 `config.web` 一份（原来这里抄了同值兜底——config 改了会漂移）
+    max_url_chars = int(max_url_chars or cfgmod.cfg("web", "max_url_chars"))
     err = _validate_url(url, max_url_chars)
     if err:
         out["error"] = err
         return out
-    max_bytes = int(max_bytes or cfgmod.cfg("web", "max_bytes", default=1_000_000)
-                    or 1_000_000)
-    max_chars = int(max_chars or cfgmod.cfg("web", "max_chars", default=20000) or 20000)
-    tmo = float(timeout or cfgmod.cfg("web", "timeout", default=30) or 30)
+    max_bytes = int(max_bytes or cfgmod.cfg("web", "max_bytes"))
+    max_chars = int(max_chars or cfgmod.cfg("web", "max_chars"))
+    tmo = float(timeout or cfgmod.cfg("web", "timeout"))
 
     p = urllib.parse.urlsplit(url)
     host = p.hostname or ""

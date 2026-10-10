@@ -111,6 +111,7 @@
 - 　· `chat_stream(self, msg)` — 流式：**和非流式用同一把锁**——窗口是串行的，对话本来就是一句一句来。
 - 　· `end(self) -> dict | None` — 收尾：提取最后一段 → 后台整理。与 `new_session` 只差「摘要清不清」。
 - 　· `new_session(self) -> dict | None` — 「新对话」：结束这一段 → 窗口（**连压缩摘要**）整个清空 → 后台整理。
+- 　· `reload_clients(self) -> None` — 配置变了：重建 LLM / 向量客户端、清掉会话（**加锁**）。
 - 　· `start_distill(self, maintenance, trigger) -> bool` — 起一个后台线程跑一次整理；已在跑则忽略（返回 False）。
 - 　· `wait_distill(self) -> bool` — 等后台提炼收工（**只给退出用**）。返回是否跑完了。
 - 　· `maintenance_tick(self) -> dict` — 体检的触发判定（记忆整理稿 §三）：量到、或时间到，就跑一次。
@@ -384,14 +385,13 @@ LLM 调用——**结构化输出 + 重试 + 失败降级**。
 | 层级 · Layer | L7 读取侧（唤醒） |
 | 上游 · Upstream | config、embedding、entity（旁路）、model、prompts（线索判定）、store |
 | 下游 · Downstream | chat（每轮唯一入口）、dashboard（把线索和抑制名单画出来）、 demo / run_experiment（直接调）、scene / distill / memo / salvage / tools （延迟 import `char_overlap` / `core_score` / `bump_counters`） |
-| 对外入口 · Entry points | `recall_for_message`（一个函数走完全程）/ `compute_cues` / `recall` / `core_score` / `rank` / `mark_mentioned` / `cue_hits`（给前端算高亮） / `cue_votes`（票制：强 2 / 弱 1，2026-10-05） |
+| 对外入口 · Entry points | `recall_for_message`（一个函数走完全程）/ `compute_cues` / `recall` / `core_score` / `mark_mentioned` / `cue_hits`（给前端算高亮） / `cue_votes`（票制：强 2 / 弱 1，2026-10-05） |
 | 边界 · Boundary | **读取侧**——唯一会写的是两个计数器，且由调用方判断该不该记 |
 
 **公开符号 · public API**
 
 - `char_overlap(a, b) -> float` — 字符 bigram Jaccard 相似度——embedding 不可用时的兜底。
 - `core_score(scene) -> float` — 核心度（存储层 §4）——决定**同一动作内**谁优先、谁先进冷层。
-- `rank(scenes) -> list[Scene]` — 按核心度从高到低排序（同一动作内的排序，见存储层 §4）。
 - `compute_cues(msg, store, emb, llm) -> dict` — 算查询侧七条线索（C1–C7）+ **两条旁路**（实体 / 字面）。
 - `r0_should_recall(msg, entities) -> bool` — R0 轻量感知：要不要翻记忆（所有输入都跑的地板）。
 - `cue_hits(cues) -> dict[str, bool]` — 逐维的「明确命中」判定——**阈值的唯一落点**。
@@ -664,7 +664,7 @@ SQLite 存储封装——**唯一的落库出口**。
 | 上游 · Upstream | config、embedding（余弦）、prompts（`drift_prompt`）、store |
 | 下游 · Downstream | distill（`run_distill_cycle` 在老化之后带它跑一轮） |
 | 对外入口 · Entry points | `topic_drift`（只给数）/ `detect_drift`（带着 LLM 判断）/ `split_by_time` |
-| 边界 · Boundary | **提疑问，不动手**——它不自己改画像，改是 `distill.revise_profile` 的事 |
+| 边界 · Boundary | **发现 + 判；修正调用 `distill.revise_profile` 完成**——两条路共用 同一个修订函数，别在这里自己再写一遍改画像的逻辑 |
 
 **公开符号 · public API**
 

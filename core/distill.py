@@ -192,7 +192,8 @@ def _same_situation(scenes: list[Scene], emb=None) -> tuple[bool, str]:
                        f"——模型整体没在分类，先查抽取 prompt")
 
     dist = Counter(classes).most_common()
-    need = max(2, int(len(classes) * 0.6 + 0.999))
+    ratio = float(cfgmod.cfg("distill", "same_situation_ratio"))
+    need = max(2, int(len(classes) * ratio + 0.999))
     if dist[0][1] < need:
         detail = " / ".join(f"{k}×{v}" for k, v in dist)
         return False, f"情境不一致（{detail}，要求同一类 ≥{need} 条）——分类噪声"

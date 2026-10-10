@@ -9,15 +9,19 @@
 
 两条约定：
   - **只读接口不碰写**：查库、看 trace 都不会改记忆
-  - **内容的写只有一个入口**：`POST /api/chat/stream`，走 `ChatSession` 那条完整链路
-    （唤醒 → 生成 → 写入）。绕过对话层直接塞场景 / 画像 / 备忘的口子一个都不开——
-    开了就迟早有人绕过链路塞数据进来。
+  - **内容的写只有一个自动入口**：`POST /api/chat/stream`，走 `ChatSession` 那条完整链路
+    （唤醒 → 生成 → 写入）。**她自己**记东西只走这一条——绕过对话层直接塞场景 /
+    画像 / 备忘的口子一个都不开（开了就迟早有人绕过链路塞数据进来）。
 
-**另有一类写是允许的：人对系统的纠正**（`POST /api/topic-merge`）。
-它不属于「内容写入」，而是人直接表达意志——和 `user_reject_profile` 同一性质。
-两者别混：**内容写入走链路（那是 air 在记），纠正走人的按钮（那是人在改）**。
-纠正同样要留痕（`weave._write_merge_trace`），因为"人什么时候纠正过什么"
-本身就是最有价值的那批数据。
+**另有一类写是允许的：人点出来的**——两种，都别和「内容写入」混：
+  - **纠正**（`/api/confirm` / `/api/memory-action` / `/api/topic-merge` /
+    `/api/entity-merge` …）：人直接表达意志——和 `user_reject_profile` 同一性质；
+  - **重记**（`/api/salvage-rebuild`）：照原文重新提取一张新卡——它**写内容**
+    （新场景 + 实体 + 备忘认领），但发起人是人、对象是已被删的旧卡，
+    不是"绕过链路塞新数据"。逐条路由见 `Handler.do_POST` 的头注。
+两者别混：**内容写入走链路（那是 air 在记），纠正 / 重记走人的按钮（那是人在改）**。
+人动的这两类同样要留痕（`weave._write_merge_trace` / `salvage._trace`），
+因为"人什么时候动过什么"本身就是最有价值的那批数据。
 """
 # ---------------------------------------------------------------------
 # 模块速查
@@ -174,6 +178,10 @@ class App:
         self.emb = build_embedding()
         self._lock = threading.Lock()
         self._session: ChatSession | None = None
+        # `_distilling` 的专用锁：**不能复用 `self._lock`**——会话锁会被流式
+        # 回复锁到一轮说完，拿它保护"起整理"会让定时线程和「新对话」按钮
+        # 白白等一整轮；这把只保护这一个标志。
+        self._distill_lock = threading.Lock()
         self._distilling = False      # 后台提炼是否在跑（同一时刻只允许一个）
         self._distill_thread: threading.Thread | None = None
         self.last_distill: dict = {}  # 最近一次提炼的结果（给界面看）
@@ -565,8 +573,9 @@ class App:
         没有会话（刚重启、还没开口）就从窗口文件构造一个临时的：
         构造只做 `_load`，撤完 `_save`，不发 LLM。
 
-        **不留痕**：撤的是还没进长期库的一段，没有记忆被改动——
-        没有"谁改了什么"要回答（旧那套「改一条消息」动的是记录，才需要留痕）。
+        **不留痕**：撤的是还没进长期库的一段，撤销自身没有要审计的东西
+        （旧那套「改一条消息」动的是记录，才需要留痕）。注意那一轮 `append`
+        里已生效的备忘命中不会被回收——见 `ShortTerm.undo_turns` 的注。
         """
         with self._lock:
             st = (self._session.st if self._session is not None
@@ -628,6 +637,21 @@ class App:
         self.start_distill()
         return out
 
+    def reload_clients(self) -> None:
+        """配置变了：重建 LLM / 向量客户端、清掉会话（**加锁**）。
+
+        为什么要锁：`_session` 的懒建发生在 `self._lock` 里（`chat` / `chat_stream`
+        持锁用自己那份），这里不锁直接换 / 置空会和它交错——把正在用（或刚要建）
+        的会话丢掉，内存里的窗口态（`_pending_cut` 这些）跟着没；也避免
+        "旧客户端建的会话、新客户端在跑"这种半新半旧的组合。
+        用会话锁会等到当前一轮说完才生效——这正是想要的：回复中途换客户端更糟，
+        保存设置本来也不该抢在这一轮里。
+        """
+        with self._lock:
+            self.llm = LLM()
+            self.emb = build_embedding()
+            self._session = None
+
     def start_distill(self, maintenance: bool = False, trigger: str = "") -> bool:
         """起一个后台线程跑一次整理；已在跑则忽略（返回 False）。
 
@@ -647,9 +671,13 @@ class App:
         ⚠️ 2026-10-05 晚：主动开口（`proactive_tick`）整块删了——
         **"对外"那一半没有了**：她现在任何时候都不先开口（见待优化稿 K 条）。）
         """
-        if self._distilling:
-            return False
-        self._distilling = True
+        # 判读 + 置位必须同锁：HTTP（/api/distill、新对话）与定时体检线程
+        # 会同时走到这里，无锁的话两边都能通过判空、各起一个整理线程
+        # （同批 S1 被两个周期并行聚合，画像可能双写）。
+        with self._distill_lock:
+            if self._distilling:
+                return False
+            self._distilling = True
         # 体检的账**起跑就结**：失败也认（下个满足条件再来，不在同一批上反复试）
         self._mark_maint_done()
 
@@ -666,7 +694,8 @@ class App:
                 # 提炼失败不该影响已经写好的记忆——它们是两件事。
                 print(f"[dashboard] 后台提炼失败（不影响已有记忆）: {e}")
             finally:
-                self._distilling = False
+                with self._distill_lock:
+                    self._distilling = False
                 # **关掉这个线程自己的连接**：`Store` 是每线程一个连接，
                 # 线程收工时关它——不关的话，每次收尾都留一条挂着的连接
                 # （Windows 上还会一直占着库文件）。
@@ -721,8 +750,10 @@ class App:
         （长会话不点新对话 / 服务常驻不收尾），10 分钟的粒度足够
         （人不会十分钟变一次自我认知，见整理稿 §二）。
         """
-        if self._distilling:
-            return {"skipped": "整理在跑"}
+        # 便宜的前置短路；真正的互斥在 `start_distill` 里（同锁）
+        with self._distill_lock:
+            if self._distilling:
+                return {"skipped": "整理在跑"}
         need = int(cfgmod.cfg("maintenance", "trigger_chars", default=10000) or 10000)
         hours = float(cfgmod.cfg("maintenance", "max_idle_hours", default=12) or 12)
         due_chars = self._chars_since_maint >= need
@@ -1379,15 +1410,11 @@ class Handler(BaseHTTPRequestHandler):
                 settings.save_local(body.get("config") or {})
                 settings.apply()
                 # 配置变了要重建客户端（endpoint / key 换了，旧的连接没有意义）
-                app.llm = LLM()
-                app.emb = build_embedding()
-                app._session = None
+                app.reload_clients()
                 return self._json(settings.describe())
             if u.path == "/api/settings/preset":
                 settings.apply_preset(body.get("name") or "")
-                app.llm = LLM()
-                app.emb = build_embedding()
-                app._session = None
+                app.reload_clients()
                 return self._json(settings.describe())
             if u.path == "/api/settings/test":
                 return self._json(settings.test_connection(body.get("section") or "llm"))

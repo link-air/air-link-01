@@ -386,7 +386,10 @@ def test_connection(section: str = "llm") -> dict:
             # 测试比真实调用更严的话，会出现「测试说通、真跑却降级」这种怪事
             from .embedding import _unverified_ctx
             ctx = _unverified_ctx() if conf.get("insecure_ssl") else None
-            with urllib.request.urlopen(req, timeout=15, context=ctx) as resp:
+            # 必须走 `net.open` 而不是 `urlopen(context=)`：后者会自己 build
+            # 一个 opener、绕开全局那份——loopback 直连豁免在这条路上会失效
+            # （同 `embedding.embed()` 的理由，见 `core/net.py` 模块头）。
+            with net.open(req, timeout=15, context=ctx) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
             dim = len((data.get("data") or [{}])[0].get("embedding") or [])
             return {"ok": bool(dim), "detail": f"通了，向量维度 {dim}"}
@@ -401,7 +404,9 @@ def test_connection(section: str = "llm") -> dict:
             headers={"Authorization": f"Bearer {api_key}",
                      "Content-Type": "application/json"},
             method="POST")
-        with urllib.request.urlopen(req, timeout=30) as resp:
+        # 同样走 `net.open`：这条目前不带 context（走全局 opener 也安全），
+        # 统一出口是为了**下次有人给这条也加 context 时不会再踩同一个坑**。
+        with net.open(req, timeout=30) as resp:
             data = json.loads(resp.read().decode("utf-8"))
         content = (data.get("choices") or [{}])[0].get("message", {}).get("content", "")
         return {"ok": True, "detail": f"通了，模型回了：{content.strip()[:20] or '(空)'}"}

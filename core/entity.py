@@ -104,7 +104,7 @@ def match_known_entities(text: str, store, max_hits: int = 5) -> list[str]:
 def recall_by_entities(names: list[str], store, limit: int = 10) -> list[Scene]:
     """实体旁路检索：命中的场景直接进候选，**不经语义检索**。
 
-    与 C1 语义检索并行，结果同样进 `rank()` 参与排序——
-    两条路的产物是同一类东西，只是发现方式不同。
+    与 C1 语义检索并行，结果同样进候选池参与四键排序（`recall` 内部的
+    `order()`）——两条路的产物是同一类东西，只是发现方式不同。
     """
     return store.scenes_by_entities(names, limit=limit)

@@ -272,6 +272,10 @@ def _walk_js(js: str, mask_literals: bool) -> str:
     正则里带着反引号和引号——朴素状态机会从那里起就一直以为自己"在字符串里"，
     于是注释漏剥、误报一片。所以照 JS 的规矩判：只有出现在"该出现正则"的位置
     （上一个有意义字符是 `(,=:[!&|?{};+-` 或行首）才按正则字面量整条跳过。
+
+    ⚠️ `mask_literals=True` 这一档当前**没有调用方**（③ 修复后只剩
+    `_strip_js_comments`）：留着是刻意的——两档共用同一套词法走法，删参数要动
+    七处分支而这里没有测试兜底；真不再需要时整段一起简化。
     """
     out = list(js)
     i, n, instr, prev = 0, len(js), None, ""
@@ -344,12 +348,9 @@ def _strip_js_comments(js: str) -> str:
     return _walk_js(js, mask_literals=False)
 
 
-def _strip_comments_and_literals(js: str) -> str:
-    """把注释、字符串字面量、模板串都换成同长度的空格（保留位置）。"""
-    return _walk_js(js, mask_literals=True)
-
-
-CN_RUN = re.compile(r"[\u4e00-\u9fff][\u4e00-\u9fff\s，。：；！？（）「」·—…0-9A-Za-z/%+-]{2,}")
+CN_RUN = re.compile(r"[\u4e00-\u9fff][\u4e00-\u9fff\s，。：；！？（）「」·—…0-9A-Za-z/%+-]{1,}")
+# ↑ 首字必是汉字，后面至少跟一个可跟随字符（`{1,}`）。原来写 `{2,}` 要 3 个
+#   字符起匹配，**两字词（"语义""模型"）永远漏检**——下限收到 2 才符合"汉字片段"的直觉。
 
 # 取词点：`t("中文")` 与 `t('中文')` 两种引号都算（index.html 里两种都有用）
 T_CALL = [
@@ -358,16 +359,19 @@ T_CALL = [
 ]
 
 
-def _split_script(src: str) -> tuple[str, str]:
-    """把 index.html 切成（HTML 段, script 段）。只认**行首**的 <script> / </script>——
-    注释与文案里提到 `<script>` 的地方（本文件里正好有两处）不能被当成真标签。"""
+def _split_script(src: str) -> tuple[str, str, int]:
+    """把 index.html 切成（HTML 段, script 段, script 段**首行的文件行号**）。
+    只认**行首**的 <script> / </script>——注释与文案里提到 `<script>` 的地方
+    （本文件里正好有两处）不能被当成真标签。
+    行号是给报警定位用的：script 段内的行号要么换算成文件行号，要么读的人
+    在文件里根本找不到地方。"""
     opens = [m for m in re.finditer(r"(?m)^<script>\s*$", src)]
     if not opens:
-        return src, ""
+        return src, "", 1
     closes = [m for m in re.finditer(r"(?m)^</script>\s*$", src)]
     start = opens[-1].end()
     end = closes[-1].start() if closes else len(src)
-    return src[:start] + src[end:], src[start:end]
+    return src[:start] + src[end:], src[start:end], src[:start].count("\n") + 1
 
 
 def _i18n_allow() -> list[str]:
@@ -386,12 +390,20 @@ def check_i18n(rep: Report) -> None:
         return
     src = html_path.read_text(encoding="utf-8")
     allow = _i18n_allow()
-    html_part, js_part = _split_script(src)
+    html_part, js_part, script_first = _split_script(src)
 
     # ① EN 词条（中文原文即 key）
-    start, end = _find_block(js_part, "const I18N = {")
-    en_block = js_part[start:end]
-    en_block = en_block[en_block.index("en: {"):]
+    # 缺 `<script>` / `const I18N = {` / `en: {` 时 `_find_block` / `index` 会抛
+    # `ValueError`——那是"文件被大改过"的信号：报 warn 走人，**别让整个自检崩**
+    # （CI 跑这个脚本，崩了会把后面的检查项一起挡住）。
+    try:
+        start, end = _find_block(js_part, "const I18N = {")
+        en_block = js_part[start:end]
+        en_block = en_block[en_block.index("en: {"):]
+    except ValueError:
+        rep.add(WARN, "7 i18n", "web/index.html",
+                "找不到 `<script>` / `const I18N = {` / `en: {`——词条表结构变了？")
+        return
     keys = re.findall(r'(?<![\w"])"((?:[^"\\]|\\.)*)"\s*:(?=\s*")', en_block)
     keyset = set(keys)
     rep.stats["EN 词条"] = len(keys)
@@ -411,16 +423,29 @@ def check_i18n(rep: Report) -> None:
         rep.add(ERR, "7 i18n 缺译", "web/index.html", repr(c))
     rep.stats["EN 词条覆盖"] = "字面量读点全部命中" if not missing else f"{len(missing)} 条缺译"
 
-    # ③ script 里"没走 t() 的中文"——注释 / 字符串 / 模板串都抠掉后再找（剩下的就是硬编码文案）
-    js = _strip_comments_and_literals(js_part[:start] + js_part[end:])
+    # ③ script 里"没走 t() 的中文"——**保留字符串 / 模板串**（只抠注释），把
+    #    `t("…")` / `t('…')` 的实参替换成空格，再跳过词条表本身。两个判据：
+    #      - 词条表里已有的中文算**受管文案**（tab 名的数组、状态码表、署名这类
+    #        "数据 key"都长这样——显示路径上仍过 `t()`，只是静态看不见），跳过；
+    #      - 剩下"连词条都没有"的中文才是缺口候选。
+    #    （旧版先把字符串整个抠掉再找中文——中文文案恰恰住在字符串里，
+    #     抠完恒为 0，是个死检查，2026-10-10 修。）
+    js = _strip_js_comments(js_part)
     for pat in T_CALL:
         js = pat.sub(lambda m: " " * len(m.group(0)), js)
+    en_from = js_part[:start].count("\n") + 1     # 词条表占的行区间（整行跳过）
+    en_to = js_part[:end].count("\n") + 1
     cn_js = []
     for lineno, line in enumerate(js.splitlines(), 1):
+        if en_from <= lineno <= en_to:
+            continue
         for m in CN_RUN.finditer(line):
-            if any(a and a in m.group(0) for a in allow):
+            frag = m.group(0).strip()
+            if any(frag in key for key in keyset):
                 continue
-            cn_js.append((lineno, m.group(0).strip()[:40]))
+            if any(a and a in frag for a in allow):
+                continue
+            cn_js.append((lineno + script_first - 1, frag[:40]))
     for lineno, text in cn_js:
         rep.add(WARN, "7 i18n 未走 t()（script）", f"web/index.html:{lineno}", text)
 

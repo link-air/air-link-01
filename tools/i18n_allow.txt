@@ -7,3 +7,4 @@
 
 记忆实验台            # <title> 的初始文案；boot 里 `document.title = t("air-link-01 · 记忆实验台")` 覆盖
 语音：…               # 顶栏语音按钮的初始占位；`renderVoicePower()` 一查到状态就换成 t("语音：开/关")
+嗯，我在。            # voiceSample() 的样句——按 LANG 三元选择（英文模式走英文句），中文分支不需要词条

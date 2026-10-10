@@ -164,7 +164,7 @@ class LLM:
         self.endpoint = (llm.get("endpoint") or "").rstrip("/")
         self.api_key = llm.get("api_key") or ""
         self.model = llm.get("model") or ""
-        self.timeout = timeout or float(llm.get("timeout") or 30)
+        self.timeout = timeout or float(cfgmod.cfg("llm", "timeout"))
         # 默认温度固定 0：抽取类任务要的是稳定、可复现（见 config 的 chat 段注释）。
         # **刻意不做成旋钮**——CONFIG / 本地配置 / 环境变量三处都没有这个键，
         # 曾经写成 `llm.get("temperature", 0.0)` 是个"读点等不到旋钮"的幽灵入口；
@@ -268,7 +268,7 @@ class LLM:
         上限调大**不会**让模型多写（它写到自然结束就停）。
         """
         if max_tokens is None:
-            max_tokens = int(cfgmod.cfg("chat", "max_tokens", default=16000))
+            max_tokens = int(cfgmod.cfg("chat", "max_tokens"))
         if self._mock is not None:
             try:
                 return self._mock(messages, {}) or ""
@@ -310,7 +310,7 @@ class LLM:
         不稳就整块关掉（设计稿第十节）。这条守住了，她才始终是那个会聊天的 air。
         """
         if max_tokens is None:
-            max_tokens = int(cfgmod.cfg("chat", "max_tokens", default=16000))
+            max_tokens = int(cfgmod.cfg("chat", "max_tokens"))
         if self._mock is not None:
             try:
                 out = self._mock(messages, {"_tools": tools} if tools else {})
@@ -390,7 +390,7 @@ class LLM:
         这比"总时长上限"准得多——后者砍的是思考，不是卡死。
         """
         if max_tokens is None:
-            max_tokens = int(cfgmod.cfg("chat", "max_tokens", default=16000))
+            max_tokens = int(cfgmod.cfg("chat", "max_tokens"))
         if not self.available():
             yield {"type": "error", "error": "no_llm"}
             return
@@ -655,7 +655,7 @@ class LLM:
 
         超时用 `search.timeout`：一次搜索要"搜 → 读 → 再生成"，比普通回复慢得多。
         """
-        tmo = timeout or float(cfgmod.cfg("search", "timeout", default=60) or 60)
+        tmo = timeout or float(cfgmod.cfg("search", "timeout"))
         req = urllib.request.Request(
             url, data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
             headers=headers, method="POST")

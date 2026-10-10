@@ -343,7 +343,9 @@ class Profile:
     双时间戳取代版本链（存储层 §3）：
       - valid_at       从什么时候起成立
       - invalidated_at 什么时候失效（为空 = 当前有效）
-    **invalidated_at 只由两件事写：新证据修正、用户否决**。
+    **invalidated_at 共三路写：新证据修正（revision）、人改陈述（user）、
+    归档（archive）——见 `INVALIDATED_*`**。（人的「否决」自 2026-09-24
+    起是真删，不填它。）
     老化过期是另一条路——只把 status 从 established 降回 pending，
     不填 invalidated_at。
     """

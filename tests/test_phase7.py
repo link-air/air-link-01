@@ -21,6 +21,7 @@ from __future__ import annotations
 import json
 import sys
 import tempfile
+import threading
 import unittest
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -563,6 +564,7 @@ class MaintenanceTickTest(Base):
         from core.dashboard import App
         app = App.__new__(App)          # 不跑 __init__（那会建 LLM / emb）
         app.store = self.store
+        app._distill_lock = threading.Lock()   # 绕过 `__init__` 就得把它的字段补齐
         app._distilling = False
         app._chars_since_maint = 0
         app.last_distill = {}

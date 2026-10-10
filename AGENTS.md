@@ -57,7 +57,7 @@ air-link-01/
 
 L11 `dashboard` → L10 `chat` → L9 `tools` / `weave` / `salvage` / `trend` → L8 `memo` → L7 `recall` → L6 `shortterm` → L5 `distill` → L4 `scene` / `entity` → L3 `prompts` / `persona` → L2 `llm` / `embedding` / `settings` / `net` / `search` → L1 `store` → L0 `config` / `model`。
 
-规则：**只能向上依赖**。两处刻意的例外别"修"掉：函数内延迟 import（`scene`→`recall.char_overlap`、`distill`→`recall.bump_counters`、`shortterm`→`memo.judge_hits`，放顶层会成环）；`dashboard` 谁都能 import。读代码顺序：`model → store → scene → shortterm → recall`——这五个读完，整条链路就有了。
+规则：**只能向上依赖**。两个刻意的例外别"修"掉：**函数内延迟 import**（core 下近三十处——防环、拖冷启动的重依赖、只在单条路径上用到的模块都走它；`scene`→`recall.char_overlap`、`distill`→`recall.bump_counters`、`shortterm`→`memo.judge_hits` 只是防环那一类的代表，**不是全部**）；`dashboard` 谁都能 import。读代码顺序：`model → store → scene → shortterm → recall`——这五个读完，整条链路就有了。
 
 ### 一次回应 = 九步，她只在第 4 步出现
 

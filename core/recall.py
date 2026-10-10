@@ -3,7 +3,7 @@
 像人一样被唤起（被线索触发，不是主动搜索），但是**正常人的唤起**
 （有选择、受控、会衰减，不是闪回和反刍）。
 
-流程：`compute_cues`（算七条线索）→ `recall`（线索耦合出动作）→ `rank`（核心度排序）
+流程：`compute_cues`（算七条线索）→ `recall`（线索耦合出动作，内部四键排序）
 → 抑制取前 N → 注入。每一次唤醒落一行 trace（§5.5）——记忆系统最难的是
 「为什么召回了这个」不可见，不留痕就没法调试，也看不出 air 的判断是否正常。
 
@@ -23,12 +23,12 @@
 #             demo / run_experiment（直接调）、scene / distill / memo / salvage / tools
 #             （延迟 import `char_overlap` / `core_score` / `bump_counters`）
 #   对外入口：`recall_for_message`（一个函数走完全程）/ `compute_cues` / `recall` /
-#             `core_score` / `rank` / `mark_mentioned` / `cue_hits`（给前端算高亮）
+#             `core_score` / `mark_mentioned` / `cue_hits`（给前端算高亮）
 #             / `cue_votes`（票制：强 2 / 弱 1，2026-10-05）
 #   边界    ：**读取侧**——唯一会写的是两个计数器，且由调用方判断该不该记
 # ---------------------------------------------------------------------
 # 本文件分段
-#   段 0  纯函数 —— 字符重叠兜底 / 衰减 / core_score / rank
+#   段 0  纯函数 —— 字符重叠兜底 / 衰减 / core_score
 #   段 1  compute_cues —— 七条线索（C1–C7）+ 两条旁路（实体 / 字面）
 #   段 2  r0_should_recall / cue_hits / multi_hit —— 门控与分级
 #   段 3  recall —— 规则版耦合（C1–C7 → R1–R6）
@@ -117,7 +117,7 @@ def core_score(scene: Scene) -> float:
 
         core = w_layer + w_int×intensity + w_imp×cited_by_profile
 
-    三个刻意的处理：
+    四个刻意的处理：
       - `cited_by_profile` 是"不设上限的重要性"，但进公式要**饱和映射**：
         不饱和的话一条被引用 50 次的场景会永远霸占第一位，
         等于把"重要"写死成"历史累计量"，新记忆再也没机会上来。
@@ -126,6 +126,8 @@ def core_score(scene: Scene) -> float:
         （`order()` 四键的第三键，见下）。理由：**一个信号只在一处表达**——
         埋在核心度里它和"强度/重要性"混成一个数，「差一票时谁赢、赢多少」答不出来。
         核心度从此只回答"这条有多重"，"有多新"由新鲜度那一键回答（存储层 §四 同日注）。
+      - **`mention_count` 不进这里、也不进排序四键**：它只用于防反刍
+        （上限 + 连续注入降权）——把念叨次数当重要性，正是设计稿要排除的"反刍"。
     """
     w = cfgmod.cfg("rank", default={}) or {}
     w_layer = (w.get("w_layer") or {}).get("S1", 0.3)
@@ -134,15 +136,6 @@ def core_score(scene: Scene) -> float:
     return (w_layer
             + float(w.get("w_intensity", 0.4)) * float(scene.intensity or 0.0)
             + float(w.get("w_imp", 0.3)) * cited_sat)
-
-
-def rank(scenes: list[Scene]) -> list[Scene]:
-    """按核心度从高到低排序（同一动作内的排序，见存储层 §4）。
-
-    `mention_count` **不参与排序**——它只用于防反刍（上限 + 连续注入降权）。
-    把念叨次数当重要性，正是设计稿要排除的"反刍"。
-    """
-    return sorted(scenes, key=core_score, reverse=True)
 
 
 # ---- 段 1：七条线索 ----
@@ -177,12 +170,13 @@ def _literal_hits(msg: str, store) -> dict[str, list[str]]:
         return {}
     max_df = int(cfgmod.cfg("recall", "literal_max_df", default=3) or 3)
     max_words = int(cfgmod.cfg("recall", "literal_max_words", default=3) or 3)
+    scan = int(cfgmod.cfg("recall", "wide_scan_limit"))
     frags: list[str] = []
     for n in (4, 3, 2):                 # 长的优先：长的更具体、更可能罕见
         for i in range(len(text) - n + 1):
             frags.append(text[i:i + n])
     frags = list(dict.fromkeys(frags))[:120]      # 去重 + 封顶（长消息不做全文扫描）
-    scenes = store.query_scenes(limit=500)
+    scenes = store.query_scenes(limit=scan)
     out: dict[str, list[str]] = {}
     for frag in frags:
         if len(out) >= max_words:
@@ -222,13 +216,15 @@ def compute_cues(msg: str, store, emb=None, llm=None) -> dict:
             if c > c1:
                 c1 = c
     else:
-        for s in store.query_scenes(limit=200):
+        for s in store.query_scenes(limit=int(cfgmod.cfg(
+                "recall", "degraded_scan_limit"))):
             c1 = max(c1, char_overlap(msg, f"{s.title} {s.text}"))
 
     # C4 自我相关性：与「关于这个人」的共鸣度，**设上限**防自我相关过度主导。
     # 一期用 subject='user' 的场景近似画像库（画像本身没存向量，二期再补）。
     c4 = 0.0
-    user_ids = {s.id for s in store.query_scenes(subject="user", limit=500)}
+    user_ids = {s.id for s in store.query_scenes(
+        subject="user", limit=int(cfgmod.cfg("recall", "wide_scan_limit")))}
     if msg_vec:
         for sid, vec in emb_map:
             if sid in user_ids:
@@ -288,7 +284,7 @@ def _c1_line(cues: dict) -> float:
     字符重叠的量级天生比余弦低：短查询命中一两个 bigram 就到 0.05 量级，
     拿向量的 0.40 去卡它，等于「降级时 R1 永远不触发」——
     那降级就不是降级，是失忆。降级状态下相关性变糙，但方向还在，
-    宁可多点噪声（有 rank + 预算兜底），也不要一条都召不回来。
+    宁可多点噪声（有四键排序 + 预算兜底），也不要一条都召不回来。
     """
     degraded = bool(cues.get("_degraded"))
     key = "degraded_c1_threshold" if degraded else "c1_threshold"
@@ -450,7 +446,8 @@ def _top_by_embedding(cues: dict, store, n: int) -> list[tuple[Scene, float]]:
         for sid, vec in store.all_embeddings():
             scored.append((sid, cosine(msg_vec, vec)))
     else:
-        for s in store.query_scenes(limit=200):
+        for s in store.query_scenes(limit=int(cfgmod.cfg(
+                "recall", "degraded_scan_limit"))):
             scored.append((s.id, char_overlap(cues.get("_msg", ""), f"{s.title} {s.text}")))
     scored.sort(key=lambda x: x[1], reverse=True)
 

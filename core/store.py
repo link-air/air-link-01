@@ -1313,8 +1313,9 @@ class Store:
                            reason: str = "") -> None:
         """**修正**：填 `invalidated_at`（旧记录进历史，不删）。
 
-        这是 invalidated_at 的**唯一**用途。老化降级走 `downgrade_profile`，
-        两者的区别在——别混。
+        这是 invalidated_at 的**修正**这一路（另两路：`by=user` 人改陈述、
+        `by=archive` 归档——归档走 `archive_profile()`，别从这里走）。
+        老化降级走 `downgrade_profile`，两者的区别在——别混。
 
         `by` 会收到 `model.INVALIDATED_*` 里的**两个**：
           - `revision`：air 自己拿到新证据后更新认知（默认）；
@@ -2106,8 +2107,8 @@ class Store:
              air 得能立刻把依据拿出来；依据进了冷层，追溯就变成一句空话。
           ② 只标记、不删行。
 
-        `score_fn(scene) -> float` 由调用方给（算核心度要用 rank，而 store 不该
-        反向依赖 recall）；不传则退回「最旧的先走」，那只是兜底不是设计。
+        `score_fn(scene) -> float` 由调用方给（算核心度要用 `recall.core_score`，
+        而 store 不该反向依赖 recall）；不传则退回「最旧的先走」，那只是兜底不是设计。
         """
         candidates = [self._scene_from_row(r) for r in self.conn.execute(
             "SELECT * FROM scenes WHERE archived = 0").fetchall()]

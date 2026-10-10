@@ -376,8 +376,8 @@ air-link-01 的仪表盘页面（整个前端就这一个文件）。
   <span class="spacer"></span>
   <!-- 和谁聊：切换后她说下一句就换人（选项从 self/personas/ 扫出来） -->
   <select id="personaSel" data-tt="和谁聊（切换后她说下一句就用新人格）"></select>
-  <span class="pill" id="hVec">语义</span>
-  <span class="pill" id="hLLM">模型</span>
+  <span class="pill" id="hVec" data-t="语义">语义</span>
+  <span class="pill" id="hLLM" data-t="模型">模型</span>
   <span class="pill" id="hDistill" style="display:none"></span>
   <!-- 语音服务开关（起 = 几秒；关 = 放显存）。**顶部快捷**，详细设置在「语音」页 -->
   <button class="ghost" id="voicePower" onclick="toggleVoicePower()">语音：…</button>
